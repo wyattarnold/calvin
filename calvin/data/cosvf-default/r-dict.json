@@ -1,0 +1,768 @@
+{
+    "GW_01": {
+        "eop_init": 38447.0,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 2,
+        "cosvf_param_index": 0,
+        "k_count": 2
+    },
+    "GW_02": {
+        "eop_init": 136494.0,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 2,
+        "cosvf_param_index": 1,
+        "k_count": 2
+    },
+    "GW_03": {
+        "eop_init": 132687.0,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 2,
+        "cosvf_param_index": 2,
+        "k_count": 2
+    },
+    "GW_04": {
+        "eop_init": 60728.0,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 2,
+        "cosvf_param_index": 3,
+        "k_count": 2
+    },
+    "GW_05": {
+        "eop_init": 91113.0,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 2,
+        "cosvf_param_index": 4,
+        "k_count": 2
+    },
+    "GW_06": {
+        "eop_init": 174968.0,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 2,
+        "cosvf_param_index": 5,
+        "k_count": 2
+    },
+    "GW_07": {
+        "eop_init": 56539.0,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 2,
+        "cosvf_param_index": 6,
+        "k_count": 2
+    },
+    "GW_08": {
+        "eop_init": 190665.0,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 2,
+        "cosvf_param_index": 7,
+        "k_count": 2
+    },
+    "GW_09": {
+        "eop_init": 139472.0,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 2,
+        "cosvf_param_index": 8,
+        "k_count": 2
+    },
+    "GW_10": {
+        "eop_init": 90210.0,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 2,
+        "cosvf_param_index": 9,
+        "k_count": 2
+    },
+    "GW_11": {
+        "eop_init": 58838.0,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 2,
+        "cosvf_param_index": 10,
+        "k_count": 2
+    },
+    "GW_12": {
+        "eop_init": 42602.0,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 2,
+        "cosvf_param_index": 11,
+        "k_count": 2
+    },
+    "GW_13": {
+        "eop_init": 138216.0,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 2,
+        "cosvf_param_index": 12,
+        "k_count": 2
+    },
+    "GW_14": {
+        "eop_init": 178840.0,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 2,
+        "cosvf_param_index": 13,
+        "k_count": 2
+    },
+    "GW_15": {
+        "eop_init": 309643.0,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 2,
+        "cosvf_param_index": 14,
+        "k_count": 2
+    },
+    "GW_16": {
+        "eop_init": 64696.0,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 2,
+        "cosvf_param_index": 15,
+        "k_count": 2
+    },
+    "GW_17": {
+        "eop_init": 97214.0,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 2,
+        "cosvf_param_index": 16,
+        "k_count": 2
+    },
+    "GW_18": {
+        "eop_init": 321375.0,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 2,
+        "cosvf_param_index": 17,
+        "k_count": 2
+    },
+    "GW_19": {
+        "eop_init": 141750.0,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 2,
+        "cosvf_param_index": 18,
+        "k_count": 2
+    },
+    "GW_20": {
+        "eop_init": 137073.0,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 2,
+        "cosvf_param_index": 19,
+        "k_count": 2
+    },
+    "GW_21": {
+        "eop_init": 341142.0,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 2,
+        "cosvf_param_index": 20,
+        "k_count": 2
+    },
+    "GW_AV": {
+        "eop_init": 20000.0,
+        "lb": 0.0,
+        "ub": 68000.0,
+        "type": 2,
+        "cosvf_param_index": 21,
+        "k_count": 2
+    },
+    "GW_CH": {
+        "eop_init": 3500.0,
+        "lb": 0.0,
+        "ub": 4000.0,
+        "type": 2,
+        "cosvf_param_index": 22,
+        "k_count": 2
+    },
+    "GW_EW": {
+        "eop_init": 7000.0,
+        "lb": 0.0,
+        "ub": 10000.0,
+        "type": 2,
+        "cosvf_param_index": 23,
+        "k_count": 2
+    },
+    "GW_HF": {
+        "eop_init": 250.0,
+        "lb": 0.0,
+        "ub": 500.0,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "GW_IM": {
+        "eop_init": 930.0,
+        "lb": 0.0,
+        "ub": 1000.0,
+        "type": 2,
+        "cosvf_param_index": 24,
+        "k_count": 2
+    },
+    "GW_MJ": {
+        "eop_init": 2580.0,
+        "lb": 0.0,
+        "ub": 4370.0,
+        "type": 2,
+        "cosvf_param_index": 25,
+        "k_count": 2
+    },
+    "GW_MWD": {
+        "eop_init": 750.0,
+        "lb": 0.0,
+        "ub": 1450.0,
+        "type": 2,
+        "cosvf_param_index": 26,
+        "k_count": 2
+    },
+    "GW_OW": {
+        "eop_init": 30000.0,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 2,
+        "cosvf_param_index": 27,
+        "k_count": 2
+    },
+    "GW_SBV": {
+        "eop_init": 2500.0,
+        "lb": 0.0,
+        "ub": 11620.0,
+        "type": 2,
+        "cosvf_param_index": 28,
+        "k_count": 2
+    },
+    "GW_SC": {
+        "eop_init": 425.0,
+        "lb": 160.0,
+        "ub": 655.0,
+        "type": 2,
+        "cosvf_param_index": 29,
+        "k_count": 2
+    },
+    "GW_SD": {
+        "eop_init": 7000.0,
+        "lb": 0.0,
+        "ub": 10000.0,
+        "type": 2,
+        "cosvf_param_index": 30,
+        "k_count": 2
+    },
+    "GW_VC": {
+        "eop_init": 275.0,
+        "lb": 0.0,
+        "ub": 10000.0,
+        "type": 2,
+        "cosvf_param_index": 31,
+        "k_count": 2
+    },
+    "SR_BER": {
+        "eop_init": 806.3,
+        "lb": 10.3,
+        "ub": 1602.3,
+        "type": 1,
+        "cosvf_param_index": [
+            32,
+            33
+        ],
+        "k_count": 15
+    },
+    "SR_BLB": {
+        "eop_init": 80.2,
+        "lb": 10.0,
+        "ub": 133.45,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_BUC": {
+        "eop_init": 58.0,
+        "lb": 10.0,
+        "ub": 135.0,
+        "type": 1,
+        "cosvf_param_index": [
+            34,
+            35
+        ],
+        "k_count": 15
+    },
+    "SR_BUL": {
+        "eop_init": 600.0,
+        "lb": 251.0,
+        "ub": 704.9999999999999,
+        "type": 1,
+        "cosvf_param_index": [
+            36,
+            37
+        ],
+        "k_count": 15
+    },
+    "SR_BVLB": {
+        "eop_init": 0.001,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_CAS": {
+        "eop_init": 294.0,
+        "lb": 18.6,
+        "ub": 323.7,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_CFW": {
+        "eop_init": 35.0,
+        "lb": 1.0,
+        "ub": 103.0,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_CLE": {
+        "eop_init": 2053.0,
+        "lb": 500.0,
+        "ub": 2447.0,
+        "type": 1,
+        "cosvf_param_index": [
+            38,
+            39
+        ],
+        "k_count": 15
+    },
+    "SR_CLK_INV": {
+        "eop_init": 306.7,
+        "lb": 0.0,
+        "ub": 613.39,
+        "type": 1,
+        "cosvf_param_index": [
+            40,
+            41
+        ],
+        "k_count": 15
+    },
+    "SR_CMN": {
+        "eop_init": 200.0,
+        "lb": 4.0,
+        "ub": 379.0,
+        "type": 1,
+        "cosvf_param_index": [
+            42,
+            43
+        ],
+        "k_count": 15
+    },
+    "SR_CR1": {
+        "eop_init": 0.0,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_CR2": {
+        "eop_init": 0.0,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_CR3": {
+        "eop_init": 0.01,
+        "lb": 0.0,
+        "ub": 4400.0,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_CRW": {
+        "eop_init": 92.5,
+        "lb": 18.3,
+        "ub": 183.5,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_DLV": {
+        "eop_init": 28.0,
+        "lb": 9.8,
+        "ub": 40.0,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_DMV": {
+        "eop_init": 600.0,
+        "lb": 230.4,
+        "ub": 825.0,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_DNP": {
+        "eop_init": 373.0,
+        "lb": 100.0,
+        "ub": 1773.0,
+        "type": 1,
+        "cosvf_param_index": [
+            44,
+            45
+        ],
+        "k_count": 15
+    },
+    "SR_EBMUD": {
+        "eop_init": 117.9,
+        "lb": 83.0,
+        "ub": 133.68,
+        "type": 1,
+        "cosvf_param_index": [
+            46,
+            47
+        ],
+        "k_count": 15
+    },
+    "SR_ENG": {
+        "eop_init": 66.0,
+        "lb": 50.0,
+        "ub": 67.0,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_FOL": {
+        "eop_init": 549.0,
+        "lb": 83.0,
+        "ub": 650.0,
+        "type": 1,
+        "cosvf_param_index": [
+            48,
+            49
+        ],
+        "k_count": 15
+    },
+    "SR_GNT": {
+        "eop_init": 26.0,
+        "lb": 11.5,
+        "ub": 47.525,
+        "type": 1,
+        "cosvf_param_index": [
+            50,
+            51
+        ],
+        "k_count": 15
+    },
+    "SR_HID": {
+        "eop_init": 24.0,
+        "lb": 4.0,
+        "ub": 69.0,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_HTH": {
+        "eop_init": 330.6,
+        "lb": 36.0,
+        "ub": 360.0,
+        "type": 1,
+        "cosvf_param_index": [
+            52,
+            53
+        ],
+        "k_count": 15
+    },
+    "SR_ISB": {
+        "eop_init": 281.9,
+        "lb": 0.184,
+        "ub": 367.26,
+        "type": 1,
+        "cosvf_param_index": [
+            54,
+            55
+        ],
+        "k_count": 15
+    },
+    "SR_LA": {
+        "eop_init": 52.0,
+        "lb": 10.2,
+        "ub": 102.5,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_LL_ENR": {
+        "eop_init": 216.6,
+        "lb": 30.1,
+        "ub": 301.3,
+        "type": 1,
+        "cosvf_param_index": [
+            56,
+            57
+        ],
+        "k_count": 15
+    },
+    "SR_LVQ": {
+        "eop_init": 88.3,
+        "lb": 72.0,
+        "ub": 104.8,
+        "type": 1,
+        "cosvf_param_index": [
+            58,
+            59
+        ],
+        "k_count": 15
+    },
+    "SR_MCR": {
+        "eop_init": 229.0,
+        "lb": 115.0,
+        "ub": 851.0,
+        "type": 1,
+        "cosvf_param_index": [
+            60,
+            61
+        ],
+        "k_count": 15
+    },
+    "SR_MHW": {
+        "eop_init": 100.1,
+        "lb": 78.5,
+        "ub": 182.0,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_MIL": {
+        "eop_init": 176.0,
+        "lb": 120.0,
+        "ub": 521.0,
+        "type": 1,
+        "cosvf_param_index": [
+            62,
+            63
+        ],
+        "k_count": 15
+    },
+    "SR_ML": {
+        "eop_init": 2939.541,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_NHG": {
+        "eop_init": 159.0,
+        "lb": 17.5,
+        "ub": 317.0,
+        "type": 1,
+        "cosvf_param_index": [
+            64,
+            65
+        ],
+        "k_count": 15
+    },
+    "SR_NML": {
+        "eop_init": 1000.0,
+        "lb": 80.0,
+        "ub": 2025.0,
+        "type": 1,
+        "cosvf_param_index": [
+            66,
+            67
+        ],
+        "k_count": 15
+    },
+    "SR_OL": {
+        "eop_init": 0.01,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_ORO": {
+        "eop_init": 2555.0,
+        "lb": 29.6,
+        "ub": 3350.0,
+        "type": 1,
+        "cosvf_param_index": [
+            68,
+            69
+        ],
+        "k_count": 15
+    },
+    "SR_PAR": {
+        "eop_init": 195.0,
+        "lb": 12.2,
+        "ub": 203.0,
+        "type": 1,
+        "cosvf_param_index": [
+            70,
+            71
+        ],
+        "k_count": 15
+    },
+    "SR_PNF": {
+        "eop_init": 550.0,
+        "lb": 45.379,
+        "ub": 1000.0,
+        "type": 1,
+        "cosvf_param_index": [
+            72,
+            73
+        ],
+        "k_count": 15
+    },
+    "SR_PRR": {
+        "eop_init": 108.0,
+        "lb": 4.1,
+        "ub": 131.5,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_PYM": {
+        "eop_init": 170.0,
+        "lb": 4.8,
+        "ub": 171.2,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_RLL_CMB": {
+        "eop_init": 48.669,
+        "lb": 6.56,
+        "ub": 65.56,
+        "type": 1,
+        "cosvf_param_index": [
+            74,
+            75
+        ],
+        "k_count": 15
+    },
+    "SR_SCAGG": {
+        "eop_init": 94.0,
+        "lb": 37.0,
+        "ub": 170.0,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_SCC": {
+        "eop_init": 41.9,
+        "lb": 0.557,
+        "ub": 65.5,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_SFAGG": {
+        "eop_init": 128.0,
+        "lb": 31.0,
+        "ub": 225.0,
+        "type": 1,
+        "cosvf_param_index": [
+            76,
+            77
+        ],
+        "k_count": 15
+    },
+    "SR_SHA": {
+        "eop_init": 2496.0,
+        "lb": 650.0,
+        "ub": 3700.0,
+        "type": 1,
+        "cosvf_param_index": [
+            78,
+            79
+        ],
+        "k_count": 15
+    },
+    "SR_SKN": {
+        "eop_init": 33.8,
+        "lb": 33.8,
+        "ub": 44.0,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_SLW": {
+        "eop_init": 50.0,
+        "lb": 20.0,
+        "ub": 75.0,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_SNL": {
+        "eop_init": 525.0,
+        "lb": 80.0,
+        "ub": 2038.0,
+        "type": 1,
+        "cosvf_param_index": [
+            80,
+            81
+        ],
+        "k_count": 15
+    },
+    "SR_SS": {
+        "eop_init": 6941.0,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_TAB": {
+        "eop_init": 49.4,
+        "lb": 9.7,
+        "ub": 11.8,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_TL": {
+        "eop_init": 0.001,
+        "lb": 0.0,
+        "ub": 1000000000000.0,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_TRM": {
+        "eop_init": 77.1,
+        "lb": 0.57,
+        "ub": 111.5,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_TUL": {
+        "eop_init": 65.0,
+        "lb": 11.0,
+        "ub": 67.0,
+        "type": 0,
+        "cosvf_param_index": null,
+        "k_count": 1
+    },
+    "SR_WHI": {
+        "eop_init": 200.0,
+        "lb": 10.0,
+        "ub": 240.00000000000003,
+        "type": 1,
+        "cosvf_param_index": [
+            82,
+            83
+        ],
+        "k_count": 15
+    }
+}

@@ -7,6 +7,30 @@ from pyomo.opt import TerminationCondition
 import numpy as np
 import pandas as pd
 
+
+def setup_logger(log_name, savedir=None):
+  """
+  Create the logger
+  """
+  if savedir is not None:
+    log_name = os.path.join(savedir,log_name)
+  logger = logging.getLogger(log_name)
+  if not logger.hasHandlers():  # hasHandlers will only be True if someone already called CALVIN with the same log_name in the same session
+    logger.setLevel("DEBUG")
+    screen_handler = logging.StreamHandler(sys.stdout)
+    screen_handler.setLevel(logging.INFO)
+    screen_formatter = logging.Formatter('%(levelname)s - %(message)s')
+    screen_handler.setFormatter(screen_formatter)
+    logger.addHandler(screen_handler)
+
+    file_handler = logging.FileHandler("{}.log".format(log_name))
+    file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
+  return logger
+
+
 class CALVIN():
 
   def __init__(self, linksfile, ic=None, log_name="calvin"):
@@ -30,20 +54,7 @@ class CALVIN():
     """
 
     # set up logging code
-    self.log = logging.getLogger(log_name)
-    if not self.log.hasHandlers():  # hasHandlers will only be True if someone already called CALVIN with the same log_name in the same session
-      self.log.setLevel("DEBUG")
-      screen_handler = logging.StreamHandler(sys.stdout)
-      screen_handler.setLevel(logging.INFO)
-      screen_formatter = logging.Formatter('%(levelname)s - %(message)s')
-      screen_handler.setFormatter(screen_formatter)
-      self.log.addHandler(screen_handler)
-
-      file_handler = logging.FileHandler("{}.log".format(log_name))
-      file_handler.setLevel(logging.DEBUG)
-      file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-      file_handler.setFormatter(file_formatter)
-      self.log.addHandler(file_handler)
+    self.log = setup_logger(log_name)
 
     df = pd.read_csv(linksfile)
     df['link'] = df.i.map(str) + '_' + df.j.map(str) + '_' + df.k.map(str)
@@ -209,7 +220,7 @@ class CALVIN():
     return df
 
 
-  def create_pyomo_model(self, debug_mode=False, debug_cost=2e7):
+  def create_pyomo_model(self, debug_mode=False, debug_cost=2e7, cosvf_mode=False):
     """
     Use link data to create Pyomo model (constraints and objective function)
     But do not solve yet.
@@ -218,6 +229,7 @@ class CALVIN():
       Use when there may be infeasibilities in the network.
     :param debug_cost: When in debug mode, assign this cost ($/AF) to flow on debug links.
       This should be an arbitrarily high number.
+    :param cosvf_mode: (boolean) When in COSVF mode, use debug links but preserve all network link costs.
     :returns: nothing, but creates the model object (self.model)
     """
 
@@ -229,7 +241,7 @@ class CALVIN():
     else:
       df = self.df
 
-    self.log.info('Creating Pyomo Model (debug=%s)' % debug_mode)
+    if not cosvf_mode: self.log.info('Creating Pyomo Model (debug=%s)' % debug_mode)
 
     model = ConcreteModel()
 
@@ -237,11 +249,15 @@ class CALVIN():
     model.k = Set(initialize=range(15))
     model.A = Set(within=model.N*model.N*model.k, 
                   initialize=self.links, ordered=True)
-    model.source = Param(initialize='SOURCE')
-    model.sink = Param(initialize='SINK')
+    model.source = Param(within=Any, initialize='SOURCE')
+    model.sink = Param(within=Any, initialize='SINK')
 
     def init_params(p):
-      if p == 'cost' and debug_mode:
+      if p == 'cost' and debug_mode and cosvf_mode is True:
+        return (lambda model,i,j,k: debug_cost 
+                  if ('DBUG' in str(i)+'_'+str(j))
+                  else df.loc[str(i)+'_'+str(j)+'_'+str(k)][p])
+      elif p == 'cost' and debug_mode:
         return (lambda model,i,j,k: debug_cost 
                   if ('DBUG' in str(i)+'_'+str(j))
                   else 1.0)
@@ -251,7 +267,7 @@ class CALVIN():
     model.u = Param(model.A, initialize=init_params('upper_bound'), mutable=True)
     model.l = Param(model.A, initialize=init_params('lower_bound'), mutable=True)
     model.a = Param(model.A, initialize=init_params('amplitude'))
-    model.c = Param(model.A, initialize=init_params('cost'))
+    model.c = Param(model.A, initialize=init_params('cost'), mutable=True)
 
     # The flow over each arc
     model.X = Var(model.A, within=Reals)
@@ -438,3 +454,43 @@ class CALVIN():
 
     self.df, self.model = df, model
     return run_again, vol_total
+
+  def model_to_dataframe(self):
+      """
+      Converts the model to a pandas dataframe. 
+      Useful for computing objective values (costs) without having to postprocess.
+      
+      :returns model_df: (Pandas dataframe) Dataframe of upper_bound, cost, 
+        and flow (solution) values for each link
+      """
+      m = self.model
+      # dataframe of the model flows
+      model_x = pd.concat(axis=1, objs=[
+        pd.DataFrame(m.X.keys(), columns=['i','j','k']),
+        pd.DataFrame([m.X[value].value for value in m.X.keys()], 
+          columns=['flow'])]).set_index(['i','j','k'])
+      
+      # dataframe of the model upper bounds
+      model_l = pd.concat(axis=1, objs=[
+        pd.DataFrame(m.l.keys(), columns=['i','j','k']),
+        pd.DataFrame([m.l[value].value for value in m.l.keys()], 
+          columns=['lower_bound'])]).set_index(['i','j','k'])
+
+      # dataframe of the model upper bounds
+      model_u = pd.concat(axis=1, objs=[
+        pd.DataFrame(m.u.keys(), columns=['i','j','k']),
+        pd.DataFrame([m.u[value].value for value in m.u.keys()], 
+          columns=['upper_bound'])]).set_index(['i','j','k'])
+
+      # dataframe of the model costs
+      model_c = pd.concat(axis=1, objs=[
+        pd.DataFrame(m.c.keys(), columns=['i','j','k']),
+        pd.DataFrame([m.c[value].value for value in m.c.keys()], 
+          columns=['cost'])]).set_index(['i','j','k'])
+
+      # join together flows, costs, and bounds
+      model_df = model_x.join(model_c, how='inner').join(model_l).join(model_u).reset_index()
+      model_df['link'] = model_df.i.map(str) + '-' + model_df.j.map(str) + '-' + model_df.k.map(str)
+      model_df.set_index('link', inplace=True)
+
+      return model_df

@@ -72,7 +72,7 @@ def dict_insert(D, k1, k2, v, collision_rule = None):
       raise ValueError('Keys [%s][%s] already exist in dictionary' % (k1,k2))
 
 
-def postprocess(df, model, resultdir=None, annual=False):
+def postprocess(df, model, resultdir=None, annual=False, year=None):
   """
   Postprocess model results into timeseries CSV files.
 
@@ -80,6 +80,7 @@ def postprocess(df, model, resultdir=None, annual=False):
   :param model: (CALVIN object) model object, post-optimization
   :param resultdir: (string) directory to place CSV file results
   :param annual: (boolean) whether to run annual optimization or not
+  :param year: (int) for annual cosvf runs, the water year being postprocessed
   :returns EOP_storage: (dict) end-of-period storage, only when 
     running annual optimization. Otherwise returns nothing, but writes files.
   """
@@ -87,18 +88,21 @@ def postprocess(df, model, resultdir=None, annual=False):
   # start with empty dicts -- this is
   # what we want to output (in separate files):
   # flows (F), storages (S), duals (D), evap (E), shortage vol (SV) and cost (SC)
-  F,S,E,SV,SC = {}, {}, {}, {}, {}
+  F,S,E,SV,SC,PV,PC,OC = {}, {}, {}, {}, {}, {}, {}, {}
   D_up,D_lo,D_node = {}, {}, {}
-  EOP_storage = {}
+  EOP, EOP_storage = {},{}
 
   links = df.values
   nodes = pd.unique(df[['i','j']].values.ravel()).tolist()
   demand_nodes = pd.read_csv(os.path.join(BASE_DIR, "data", "demand_nodes.csv"), index_col=0)
-
+  pwp_nodes = pd.read_csv(os.path.join(BASE_DIR, "data", "pwp_nodes.csv"), index_col = 0)
+  op_nodes = pd.read_csv(os.path.join(BASE_DIR, "data", "operation_nodes.csv"), index_col = 0)
   for link in links:
     # get values from JSON results. If they don't exist, default is 0.0.
     # (sometimes pyomo does not include zero values in the output)
     s = tuple(link[0:3])
+    ub = float(link[6])
+    unit_cost = float(link[3])
     v = model.X[s].value if s in model.X else 0.0
     d1 = model.dual[model.limit_lower[s]] if s in model.limit_lower else 0.0
     d2 = model.dual[model.limit_upper[s]] if s in model.limit_upper else 0.0
@@ -110,34 +114,56 @@ def postprocess(df, model, resultdir=None, annual=False):
       is_storage_node = (n1 == n2)
       if is_storage_node:
         amplitude = float(link[4])
+        is_EOP = False
     elif '.' in link[0] and link[1] == 'FINAL': # End-of-period storage for reservoirs
       n1,t1 = link[0].split('.')
       is_storage_node = True
       amplitude = 1
-      EOP_storage[n1] = v
+      is_EOP = True
     else:
       continue
+
+    # overwrite year if in cosvf mode
+    if not year==None and year>1922:
+      t1 = t1.replace('1922',str(year)).replace('1921',str(year-1))
 
     # sum over piecewise components
     if is_storage_node:
       key = n1
-      evap = (1 - amplitude)*float(v)/amplitude
-      dict_insert(S, key, t1, v, 'sum')
-      dict_insert(E, key, t1, evap, 'sum')
+      if is_EOP:
+        if key in EOP:
+          EOP[key] += v 
+        else:
+          EOP[key] = v
+        dict_insert(EOP_storage, key, t1, v, 'sum')
+        dict_insert(S, key, t1, v, 'sum')
+      else:
+        evap = (1 - amplitude)*float(v)/amplitude
+        dict_insert(S, key, t1, v, 'sum')
+        dict_insert(E, key, t1, evap, 'sum')
     else:
       key = n1 + '-' + n2
       dict_insert(F, key, t1, v, 'sum')
 
       # Check for urban or ag demands
       if key in demand_nodes.index.values:
-        ub = float(link[6])
-        unit_cost = float(link[3])
         if (ub - v) > 1e-6: # if there is a shortage
           dict_insert(SV, key, t1, ub-v, 'sum')
           dict_insert(SC, key, t1, -1*unit_cost*(ub-v), 'sum')
         else:
           dict_insert(SV, key, t1, 0.0, 'sum')
           dict_insert(SC, key, t1, 0.0, 'sum')
+
+      if key in pwp_nodes.index.values:
+        if (ub - v) > 1e-6 and unit_cost<0 : # if there is a shortage
+          dict_insert(PV, key, t1, ub-v, 'sum')
+          dict_insert(PC, key, t1, -1*unit_cost*(ub-v), 'sum')
+        else:
+          dict_insert(PV, key, t1, 0.0, 'sum')
+          dict_insert(PC, key, t1, 0.0, 'sum')
+      
+      if key in op_nodes.index.values:
+        dict_insert(OC, key, t1, unit_cost*v, 'sum')
 
     # open question: what to do about duals on pumping links? Is this handled?
     dict_insert(D_up, key, t1, d1, 'last')
@@ -166,12 +192,14 @@ def postprocess(df, model, resultdir=None, annual=False):
     os.makedirs(resultdir)
     mode = 'w'
   elif annual:
-    mode = 'a'
+    mode = 'w' if year == 1922 else 'a'
 
   things_to_save = [(F, 'flow'), (S, 'storage'), (D_up, 'dual_upper'), 
                     (D_lo, 'dual_lower'), (D_node, 'dual_node'),
                     (E,'evaporation'), (SV,'shortage_volume'),
-                    (SC,'shortage_cost')]
+                    (SC,'shortage_cost'), (EOP_storage,'eop_storage'),
+                    (PV,'pwp_short_volume'), (PC,'pwp_short_cost'), 
+                    (OC,'operation_costs')]
 
   for data,name in things_to_save:
     save_dict_as_csv(data, resultdir + '/' + name + '.csv', mode)
@@ -179,7 +207,7 @@ def postprocess(df, model, resultdir=None, annual=False):
   if not annual:
     aggregate_regions(resultdir)
   else:
-    return EOP_storage
+    return EOP
 
 
 def aggregate_regions(fp):
