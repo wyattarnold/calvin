@@ -4,3 +4,12 @@ __pycache__/
 results*
 calvin/data/links*.csv
 calvin/data/annual/*
+my-models*
+.ipynb_checkpoints/
+.vscode
+*.code-workspace
+notebooks/
+notes.md
+todo.md
+main-pf.py
+main-cosvf-front-solutions.py
