@@ -1,4 +1,4 @@
-
+# %% Prepare necessary COSVF default inputs
 import os
 import json
 import numpy as np
@@ -10,7 +10,7 @@ pf_dir = './my-models/calvin-pf'
 lf_dir = './my-models/calvin-lf'
 
 
-# load perfect foresight links
+#  %% load perfect foresight links
 pf_links = pd.read_csv(os.path.join(pf_dir,'links82yr.csv'))
 # remove debug nodes
 pf_links = pf_links.loc[
@@ -30,7 +30,7 @@ pf_links.insert(0, 'date',
     value=pd.DatetimeIndex(pf_links.i.str.split('.').str[1]))
 
 
-# # Inflows
+# %% Inflows
 # Extract monthly inflows to csv
 # load inflows 
 inflow_qwry = pf_links.loc[(pf_links.i.str.contains('INFLOW'))]
@@ -41,11 +41,12 @@ inflows['date'] = pd.DatetimeIndex(inflows['date'])
 inflows.set_index('date',inplace=True)
 # get inflow values
 inflows.insert(1,'flow_taf', value = inflow_qwry['lower_bound'].values)
-# final output
+
+# %%  save out inflows output
 inflows.to_csv(os.path.join(lf_dir,'inflows.csv'))
 
 
-# # Variable Constraints
+# %% Variable Constraints
 # Query out upper and lower bounds that change from year to year and export to csv
 def get_variable_range(links,column):
     variable_links = links.groupby(
@@ -73,13 +74,14 @@ variable_constraints = variable_constraints.loc[
     variable_constraints.i_node!=variable_constraints.j_node]
 # add back in the variable storage constraints for all other months than September
 variable_constraints = variable_constraints.append(variable_constraints_storages)   
-# final output
+
+# %% save out variable constraints output
 variable_constraints = variable_constraints[['date','i','j','k','lower_bound','upper_bound']]
 variable_constraints.to_csv(
     os.path.join(lf_dir,'variable-constraints.csv'),index=False)
 
 
-# # Reservoirs
+# %% Reservoirs
 # List of reservoirs
 r_list = pf_links.loc[(pf_links.i_node.str.startswith('INITIAL'))].j_node.unique()
 
@@ -89,10 +91,10 @@ r_type1 = ['SR_BER','SR_BUC','SR_BUL','SR_CLE','SR_CLK_INV','SR_CMN','SR_DNP',
             'SR_MIL','SR_NHG','SR_NML','SR_ORO','SR_PAR','SR_PNF','SR_RLL_CMB',
             'SR_SHA','SR_SNL','SR_SFAGG','SR_GNT','SR_WHI']
 
-r_type2 = ['GW_01', 'GW_02', 'GW_03', 'GW_04', 'GW_05', 'GW_06', 'GW_07',
-           'GW_08', 'GW_09', 'GW_10', 'GW_11', 'GW_12', 'GW_13', 'GW_14',
-           'GW_15', 'GW_16', 'GW_17', 'GW_18', 'GW_19', 'GW_20', 'GW_21',
-           'GW_AV', 'GW_CH', 'GW_EW', 'GW_IM', 'GW_MJ', 'GW_MWD',
+r_type2 = ['GW_01', 'GW_02', 'GW_05', 
+           'GW_08', 'GW_10', 'GW_11', 'GW_12', 'GW_13',
+           'GW_16', 'GW_17', 'GW_18', 'GW_20', 'GW_21',
+           'GW_AV', 'GW_CH', 'GW_EW', 'GW_MJ', 'GW_MWD',
            'GW_OW', 'GW_SBV', 'GW_SC', 'GW_SD', 'GW_VC']
 
 # reservoir dictionary for calvin limited foresight run
@@ -126,20 +128,22 @@ for r in r_list:
         ('cosvf_param_index',cosvf_param_index),
         ('k_count',k_count)])
 
-# save out the reservoir dictionary to json file
+# %% save out the reservoir dictionary to json file
 with open(os.path.join(lf_dir,'r-dict.json'), 'w') as json_file:
     json.dump(r_dict, json_file, 
         sort_keys=False, indent=4, separators=(',', ': '))
 
-# # Create default COSVF params
+# %% Create default COSVF params
 param=['pmin','pmax']
 rtype1_list = list({key: value for key, value in r_dict.items() if value['type'] == 1}.keys())
 rtype2_list = list({key: value for key, value in r_dict.items() if value['type'] == 2}.keys())
 pos_r_list = rtype2_list + list(np.repeat(rtype1_list, len(param)))
-cosvf_pminmax = pd.DataFrame({'value':np.tile([-100,-300],16+26)}) # this works only if number of linear penalties is even
+cosvf_pminmax = pd.DataFrame({'value':
+    list(np.repeat([-1e2], len(rtype2_list))) + list(np.tile([-1e2, -7e2], len(rtype1_list)))})
 cosvf_pminmax.insert(0,'r',value=pos_r_list)
 cosvf_pminmax.insert(1,'param',value=list(['p'] * len(rtype2_list) + param * len(rtype1_list)))
-# final output
+
+# %% save out default COSVF params
 cosvf_pminmax.to_csv(os.path.join(lf_dir,'cosvf-params.csv'),index=False)
 
 
