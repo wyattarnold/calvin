@@ -56,16 +56,17 @@ class COSVF(CALVIN):
     # set working directory
     self.pwd = pwd
 
-    # set up logging code
-    self.log = setup_logger(log_name, savedir=pwd)
-
     # if COSVF links file does not exist in pwd, copy the default files to the pwd
     linksfile = os.path.join(self.pwd , 'links.csv')
     if not os.path.isfile(linksfile):
+      if not os.path.isdir(self.pwd): os.makedirs(self.pwd)
       src, dst = os.path.join(BASE_DIR, "data", "cosvf-default"), self.pwd
       names = os.listdir(src)
       for name in names:
         shutil.copy2(os.path.join(src, name), os.path.join(dst, name))
+
+    # set up logging code
+    self.log = setup_logger(log_name, savedir=pwd)
 
     # load links
     self.df = pd.read_csv(os.path.join(self.pwd , 'links.csv'))
@@ -101,7 +102,7 @@ class COSVF(CALVIN):
     self.df.set_index('link', inplace=True)
 
     # SR stats for hydropower checks
-    SR_stats = pd.read_csv('calvin/data/SR_stats.csv', index_col=0).to_dict()
+    SR_stats = pd.read_csv(os.path.join(BASE_DIR,'data','SR_stats.csv'), index_col=0).to_dict()
     self.min_storage = SR_stats['min']
     self.max_storage = SR_stats['max']
 
@@ -186,7 +187,7 @@ class COSVF(CALVIN):
     # declare solver
     from pyomo.opt import SolverFactory
     opt = SolverFactory(solver)
-    if nproc > 1 and solver is not 'glpk':
+    if nproc > 1 and solver != 'glpk':
       opt.options['threads'] = nproc
 
     # overwrite pcosvf (used for evolutionary mode)
@@ -277,10 +278,10 @@ class COSVF(CALVIN):
                                         (model_df['i'].str.contains('GW'))) &
                                         (model_df['j'].str.contains('FINAL'))].index)
     cost_links = cost_links.loc[~cost_links.index.str.contains('DBUG')]
-    cost_links = cost_links.loc[cost_links.upper_bound < 1e12]
 
-    # all shortage links
+    # all shortage cost links
     short_links = cost_links.loc[(cost_links['cost']<0)]
+    short_links = short_links.loc[short_links.upper_bound < 1e6] # drop channel persuasions
     short_costs = -1 * ((short_links.upper_bound - short_links.flow) * short_links.cost).sum()
 
     # all op cost links
@@ -338,7 +339,7 @@ class COSVF(CALVIN):
     x = np.linspace(eop_min, eop_max, k_count+1)
     y = a * x**2 + b * x + c
 
-    return x, y
+    return x, y, a, b, c
 
 
   def cosvf_marginal_piecewise(self, x, y):
@@ -370,7 +371,7 @@ class COSVF(CALVIN):
     # Pmin Pmax for r-type 1 (quadratic COSVF)
     if self.r_dict[r]['type']==1:
       # construct COSVF from params
-      cosvfx, cosvfy = self.cosvf_fit_from_params(
+      cosvfx, cosvfy, a, b, c = self.cosvf_fit_from_params(
         pmin=self.pcosvf[self.r_dict[r]['cosvf_param_index'][0]], 
         pmax=self.pcosvf[self.r_dict[r]['cosvf_param_index'][1]],
         eop_min=self.r_dict[r]['lb'],
@@ -479,18 +480,19 @@ def cosvf_ea_main(toolbox, n_gen, mu, pwd, cxpb=1, mutpb=1, seed=None, log_name=
   :param pwd: (path) directory to save evolutionary results and checkpoints
   :param cxpb: (float) [0,1] probability of mating two individuals (consecutive pairs in pop)
   :param mutpb: (float) [0,1] probability of mutating an individual
-  :param seed: (int) random seed
+  :param seed: (int) random seed (will assign random integer b/t 1 and 100 if not specified)
   :param log_name: (string) global logger name to use, log file will save to ``pwd``
   :returns: nothing, but outputs evolutionary results to CSV and a pickled checkpoint
   """ 
+  # set seed
+  seed = random.randint(1,100) if seed is None else seed
+  random.seed(seed)
 
   # set up logging code
-  log = setup_logger(log_name=log_name, savedir=pwd)
+  if not os.path.isdir(pwd): os.makedirs(pwd)
+  log = setup_logger(log_name=log_name+'_seed'+str(seed), savedir=pwd)
   log.info('------Evolutionary search for COSVF---------')
   log.info('Pop={} | Gen={} | Seed={}'.format(mu, n_gen, seed))
-
-  # set seed
-  random.seed(seed)
 
   # Initialize statistics objects
   pop_hist = tools.Statistics()
@@ -554,19 +556,19 @@ def cosvf_ea_main(toolbox, n_gen, mu, pwd, cxpb=1, mutpb=1, seed=None, log_name=
     # checkpoint ea every 10 generations
     if gen % 10 == 0:
       cp = dict(population=pop, generation=gen, logbook=logbook, random_state=random.getstate())
-      with open(os.path.join(pwd,"cosvf_ea_chkpnt.pickle"), "wb") as cp_file:
+      with open(os.path.join(pwd,"cosvf-ea-chkpnt-{}.pickle".format(seed)), "wb") as cp_file:
         pickle.dump(cp, cp_file)
 
   # checkpoint the final iteration
   cp = dict(population=pop, generation=gen, logbook=logbook, random_state=random.getstate())
-  with open(os.path.join(pwd,"cosvf_ea_chkpnt.pickle"), "wb") as cp_file:
+  with open(os.path.join(pwd,"cosvf-ea-chkpnt-{}.pickle".format(seed)), "wb") as cp_file:
     pickle.dump(cp, cp_file)
 
   # save out logbook to csv
-  logbook_to_csv(logbook, pwd)
+  logbook_to_csv(logbook, pwd, seed)
 
 
-def cosvf_ea_toolbox(cosvf_evaluate, nrtype, mu, nobj=3, cx_eta=5., mut_eta=40., mutind_pb=0.5):
+def cosvf_ea_toolbox(cosvf_evaluate, nrtype, mu, nobj=3, cx_eta=10., mut_eta=40., mutind_pb=0.5):
   """
   Create a DEAP toolbox with the NSGA-III selection evolutionary algorithm.
 
@@ -590,11 +592,9 @@ def cosvf_ea_toolbox(cosvf_evaluate, nrtype, mu, nobj=3, cx_eta=5., mut_eta=40.,
   toolbox = Toolbox()
 
   # population
-  n_param=nrtype[0]+int(nrtype[1]/2)
-  toolbox.register("attr_pmin", random.uniform, -4.0e2, -1.)
-  toolbox.register("attr_pmax", random.uniform, -1.5e3, -4.0e2)
-  toolbox.register("individual", tools.initCycle, creator.Individual,
-           (toolbox.attr_pmin, toolbox.attr_pmax), n=n_param)
+  n_param=(nrtype[0]*2)+nrtype[1]
+  toolbox.register("attr_pminmax", random.uniform, -1.0e3, -1.)
+  toolbox.register("individual", tools.initRepeat, creator.Individual, toolbox.attr_pminmax, n=n_param)
   toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
   # mating
@@ -603,7 +603,6 @@ def cosvf_ea_toolbox(cosvf_evaluate, nrtype, mu, nobj=3, cx_eta=5., mut_eta=40.,
   toolbox.register("mutate", tools.mutPolynomialBounded, low=-3e3, up=0., eta=mut_eta, indpb=mutind_pb)
 
   # bound check
-  toolbox.decorate("population", cosvf_revise_rtype2_init_bounds(nrtype[1]))
   toolbox.decorate("mate", cosvf_check_bounds(nrtype[1]))
   toolbox.decorate("mutate", cosvf_check_bounds(nrtype[1]))
 
@@ -641,27 +640,6 @@ def cosvf_check_bounds(rtype1_start_idx):
         for pmax in range(rtype1_start_idx+1, len(ind), 2):
           if ind[pmax] > ind[pmax-1]:
             ind[pmax] = ind[pmax-1]+(ind[pmax-1]*random.uniform(0.05, 1))
-      return population
-    return wrapper
-  return decorator
-
-
-def cosvf_revise_rtype2_init_bounds(rtype1_start_idx):
-  """
-  Revise rtype2 (linear) indiviudals initial generated values.
-
-  This is needed since the intiial values were generated assuming all parameters in 
-  the individual were pairs of pmin and pmax for the rtype2 (quadratic) COSVF
-
-  :param rtype1_start_idx: (int) position in individual parameter list at which rtype1 begin
-  :returns decorator: (func) a decorator function that is applied when the population is initialized
-  """
-  def decorator(func):
-    def wrapper(*args, **kargs):
-      population = func(*args, **kargs)
-      for ind in population:
-        for idx in range(0, rtype1_start_idx):
-          ind[idx] = -1*random.uniform(0, 1000)
       return population
     return wrapper
   return decorator
@@ -723,23 +701,24 @@ def get_pareto_solutions(cost_ea_hist, f1_label, f2_label):
   :param f2_label: (string) column name of second fitness
   :returns front_pop: (Pandas dataframe) non-dominated solutions sorted by first fitness
   """
-
-  values = cost_ea_hist[[f1_label,f2_label]].to_numpy()
+  fitnesses = cost_ea_hist.groupby(['gen','ind']).aggregate({f1_label:'mean', f2_label:'mean'}).reset_index()
+  values = fitnesses[[f1_label,f2_label]].to_numpy()
   front = pareto_sort(values)
   front_pop = pd.DataFrame({f1_label:front[:,0],f2_label:front[:,1]}) \
-                .merge(cost_ea_hist,on=[f1_label,f2_label],how='inner')
+                .merge(fitnesses,on=[f1_label,f2_label],how='inner').drop_duplicates(subset=[f1_label,f2_label])
   front_pop = front_pop.sort_values(f1_label).reset_index(drop=True)
 
   return front_pop
 
 
-def logbook_to_csv(logbook, pwd):
+def logbook_to_csv(logbook, pwd, seed):
   """
   Convert the logbook of evolutionary history to a CSV file.
 
   :param logbook: (object) DEAP logbook of evolutionary history
   :param pwd: (path) directory to save evolutionary results and checkpoints
-  :returns: nothing, but outputs CSV file ``cosvf-ea-history.csv``
+  :param seed: (int) random seed used in EA generations
+  :returns: nothing, but outputs CSV file ``cosvf-ea-history-seed[number].csv``
   """
   # dictionary of surface and groundwater reservoir nodes
   with open(os.path.join(pwd, 'r-dict.json')) as f: 
@@ -778,4 +757,4 @@ def logbook_to_csv(logbook, pwd):
     cost_df = cost_df.append(c_df)
 
   df = pos_df.merge(cost_df, on=['gen','ind'])
-  df.to_csv(os.path.join(pwd, 'cosvf-ea-history.csv'),index=False)
+  df.to_csv(os.path.join(pwd, 'cosvf-ea-history-seed{}.csv'.format(seed)),index=False)

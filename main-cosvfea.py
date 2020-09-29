@@ -9,12 +9,11 @@ from calvin import cosvfea
 
 COSVF_DIR='./my-models/calvin-lf'  # (path) Directory of Calvin model for COSVF search
 NRTYPE1=26          # (int) Number of quadratic COSVF reservoirs
-NRTYPE2=32          # (int) Number of linear COSVF reservoirs
+NRTYPE2=23          # (int) Number of linear COSVF reservoirs
 SOLVER='gurobi'     # (string) Solver for Pyomo model
-NPROC=1             # (int) Number of processors to allocate to each solver
-SEED=2              # (int) Random seed
-NGEN=1              # (int) Number of evolutionary generations to conduct
-MU=8                # (int) Population count
+NPROC=2             # (int) Number of processors to allocate to each solver
+NGEN=100             # (int) Number of evolutionary generations to conduct
+MU=96               # (int) Population count
 
 # calvin evaluation function for ea
 def cosvf_evaluate(pcosvf):
@@ -31,4 +30,4 @@ if __name__ == "__main__":
     with MPIPoolExecutor() as executor:
         toolbox.register("map", executor.map)
         # conduct cosvf search (output as a DEAP logbook of evolutionary process)
-        cosvfea.cosvf_ea_main(toolbox=toolbox, n_gen=NGEN, mu=MU, seed=SEED, pwd=COSVF_DIR)
+        cosvfea.cosvf_ea_main(toolbox=toolbox, n_gen=NGEN, mu=MU, pwd=COSVF_DIR)
