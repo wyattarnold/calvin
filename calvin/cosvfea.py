@@ -63,7 +63,10 @@ class COSVF(CALVIN):
       src, dst = os.path.join(BASE_DIR, "data", "cosvf-default"), self.pwd
       names = os.listdir(src)
       for name in names:
-        shutil.copy2(os.path.join(src, name), os.path.join(dst, name))
+        if name.endswith('py') or name.endswith('md') or name.endswith('default.csv'):
+          continue
+        else:
+          shutil.copy2(os.path.join(src, name), os.path.join(dst, name))
 
     # set up logging code
     self.log = setup_logger(log_name, savedir=pwd)
@@ -92,7 +95,7 @@ class COSVF(CALVIN):
 
     # load time-varying upper and lower bounds for entire period of analysis
     self.variable_constraints = pd.read_csv(os.path.join(self.pwd , 'variable-constraints.csv'),
-      index_col=0, parse_dates=True, infer_datetime_format=True)
+      index_col=0, parse_dates=True)
 
     # construct placeholder cosvf cost links for the reservoirs
     self.create_cosvf_links()
@@ -128,21 +131,20 @@ class COSVF(CALVIN):
 
     # loop through reservoirs to construct piecewise COSVF placeholders
     for r in r_dict:
-
-      # edit k, ub, and lb in calvin r final nodes
-      l = df[(df.i.str.contains(r)) & (df.j.str.contains('FINAL'))].copy()
-
-      # remove r node so it's not duplicated
-      self.df.drop(l.index, inplace=True) 
-
-      # add in the minimum capacity for k=0
-      l.lower_bound, l.upper_bound, l.cost = r_dict[r]['lb'], r_dict[r]['ub'], 0
-
       # for reservoir w/ penalties
       if r_dict[r]['type']>=1:
 
+        # edit k, ub, and lb in calvin r final nodes
+        l = df[(df.i.str.contains(r)) & (df.j.str.contains('FINAL'))].copy()
+
+        # remove r node so it's not duplicated
+        self.df.drop(l.index, inplace=True) 
+
+        # add in the minimum capacity for k=0
+        l.lower_bound, l.upper_bound, l.cost = r_dict[r]['lb'], r_dict[r]['ub'], 0.0
+
         # add k-links
-        l = l.append([l]*(r_dict[r]['k_count']-1), ignore_index=True)
+        l = pd.concat([l]*(r_dict[r]['k_count']), ignore_index=True)
         l.loc[:,'k'] = list(range(r_dict[r]['k_count']))
 
         # provide dummy penalty link costs and breakpoints (will be replaced by solve init)
@@ -150,7 +152,7 @@ class COSVF(CALVIN):
         l.loc[l.k > 0,'upper_bound'] = 0
         l.loc[l.k==0,'cost'] = -0.01
       
-      self.df = self.df.append(l)
+        self.df = pd.concat([self.df, l], ignore_index=False)
 
 
   def create_pyomo_model(self, **kwargs):
@@ -159,7 +161,7 @@ class COSVF(CALVIN):
     
     The COSVF instance of CALVIN uses CALVIN's ``create_pyomo_model`` but with ``cosvf_mode`` parameter **always** on.
     The only difference is whether debug links will be used or not. When debug_mode is used with COSVF, the
-    debug links are assigned the default (or user specified) ```debug_cost`` of 2e7 \$/af; however, all other cost links
+    debug links are assigned the default (or user specified) ```debug_cost`` of 2e7 \\$/af; however, all other cost links
     are left with costs as is. See ``calvin.create_pyomo_model`` ``init_params`` function.
 
     :returns: nothing
@@ -244,7 +246,7 @@ class COSVF(CALVIN):
         f1 += (short_costs + op_costs)
         f2 = self.compute_gw_overdraft(model_df)
 
-        self.log.debug('Costs $M/yr=%.1f; GW O.D. MAF/yr=%.1f' % (f1/1e3/years, f2/1e3/years))
+        self.log.debug('Costs \\$M/yr=%.1f; GW O.D. MAF/yr=%.1f' % (f1/1e3/years, f2/1e3/years))
 
         # postprocessing and saving
         if resultdir is not None: 
@@ -384,9 +386,8 @@ class COSVF(CALVIN):
 
     # linear penalty for r-type 2 (linear COSVF)
     elif self.r_dict[r]['type']==2:
-      r_b, r_k = [self.r_dict[r]['eop_init'], 
-            self.r_dict[r]['ub'] - self.r_dict[r]['eop_init']], \
-             [self.pcosvf[self.r_dict[r]['cosvf_param_index']], 0]
+      r_b = [self.r_dict[r]['eop_init'],  self.r_dict[r]['ub'] - self.r_dict[r]['eop_init']]
+      r_k = [self.pcosvf[self.r_dict[r]['cosvf_param_index']], 0]
 
     return r_b, r_k
 
@@ -433,7 +434,7 @@ class COSVF(CALVIN):
     """ 
     # replace inflows for current wy in sequence
     offset = wy - self.wy_start
-    dates = pd.date_range('{}-10-31'.format(wy - 1), '{}-09-30'.format(wy), freq='M')
+    dates = pd.date_range('{}-10-31'.format(wy - 1), '{}-09-30'.format(wy), freq='ME')
     for t in self.inflow_terminals:
       for date in dates:
         inflow = self.inflows.loc[date, t]
@@ -450,7 +451,7 @@ class COSVF(CALVIN):
     :returns: nothing, but modifies CALVIN model object
     """
     offset = wy - self.wy_start 
-    dates = pd.date_range('{}-10-31'.format(wy - 1), '{}-09-30'.format(wy), freq='M')
+    dates = pd.date_range('{}-10-31'.format(wy - 1), '{}-09-30'.format(wy), freq='ME')
     variable_constraints_wy = self.variable_constraints.loc[dates]
     for idx, row in variable_constraints_wy.iterrows():
       i_node, i_date = row.i.split('.')[0], row.i.split('.')[1]
@@ -594,14 +595,14 @@ def cosvf_ea_toolbox(cosvf_evaluate, nrtype, mu, nobj=3, cx_eta=10., mut_eta=40.
 
   # population
   n_param=(nrtype[0]*2)+nrtype[1]
-  toolbox.register("attr_pminmax", random.uniform, -1.0e3, -1.)
+  toolbox.register("attr_pminmax", random.uniform, -6.0e2, -1.)
   toolbox.register("individual", tools.initRepeat, creator.Individual, toolbox.attr_pminmax, n=n_param)
   toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
   # mating
-  toolbox.register("mate", tools.cxSimulatedBinaryBounded, low=-2e3, up=0., eta=cx_eta)
+  toolbox.register("mate", tools.cxSimulatedBinaryBounded, low=-1.5e3, up=0., eta=cx_eta)
   # mutation
-  toolbox.register("mutate", tools.mutPolynomialBounded, low=-2e3, up=0., eta=mut_eta, indpb=mutind_pb)
+  toolbox.register("mutate", tools.mutPolynomialBounded, low=-1.5e3, up=0., eta=mut_eta, indpb=mutind_pb)
 
   # bound check
   toolbox.decorate("population", cosvf_check_bounds(nrtype[1],init=True))
@@ -612,7 +613,7 @@ def cosvf_ea_toolbox(cosvf_evaluate, nrtype, mu, nobj=3, cx_eta=10., mut_eta=40.
   toolbox.register("evaluate", cosvf_evaluate)
 
   # selection
-  pdiv = pdiv_from_mu(mu)
+  pdiv = pdiv_from_mu(mu,nobj=nobj)
   ref_points = tools.uniform_reference_points(nobj=nobj, p=pdiv)
   toolbox.register("select", tools.selNSGA3WithMemory(ref_points))
 
@@ -697,7 +698,7 @@ def logbook_to_csv(logbook, pwd, seed):
       'r': list(rtype2_list) * len(ind_list),
       'param': ['p'] * len(rtype2_list) * len(ind_list)})
     pos = pd.melt(pd.DataFrame(np.array(logbook.select('pop')[iteration])).T[0:len(rtype2_list)])['value']
-    pos_df = pos_df.append(pd.concat([p_df, pos], axis=1))
+    pos_df = pd.concat([pos_df, pd.concat([p_df, pos], axis=1)], ignore_index=True)
 
     p_df = pd.DataFrame(
       {'gen': np.repeat(iteration, len(rtype1_list) * len(param) * len(ind_list)),
@@ -705,14 +706,14 @@ def logbook_to_csv(logbook, pwd, seed):
       'r': list(np.repeat(rtype1_list, len(param))) * len(ind_list),
       'param': param * len(rtype1_list) * len(ind_list)})
     pos = pd.melt(pd.DataFrame(np.array(logbook.select('pop')[iteration])).T[-len(rtype1_list)*2:])['value']
-    pos_df = pos_df.append(pd.concat([p_df, pos], axis=1))
+    pos_df = pd.concat([pos_df, pd.concat([p_df, pos], axis=1)], ignore_index=True)
 
     c_df = pd.DataFrame(
       {'gen': iteration, 'ind': ind_list,
       'f1': np.array(logbook.select('fitnesses')[iteration]).T[0],
       'f2':np.array(logbook.select('fitnesses')[iteration]).T[1],
       'f3':np.array(logbook.select('fitnesses')[iteration]).T[2]})
-    cost_df = cost_df.append(c_df)
+    cost_df = pd.concat([cost_df, c_df], ignore_index=True)
 
   df = pos_df.merge(cost_df, on=['gen','ind'])
   df.to_csv(os.path.join(pwd, 'cosvf-ea-history-seed{}.csv'.format(seed)),index=False)

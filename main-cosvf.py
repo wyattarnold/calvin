@@ -3,7 +3,7 @@ import os, shutil
 from calvin import cosvfea
 
 # CONFIG
-COSVF_DIR = './my-models/calvin-lf'     # DIRECTORY FOR LINKS, INFLOWS, SR_DICT etc.
+COSVF_DIR = './my-models/calvin-lf-test'     # DIRECTORY FOR LINKS, INFLOWS, SR_DICT etc.
 SOLVER, NPROC = 'cbc', 1             # SOLVER AND CPU
 
 # construct results path from run name

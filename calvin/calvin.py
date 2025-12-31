@@ -184,7 +184,7 @@ class CALVIN():
       links.upper_bound = maxub
       links['link'] = links.i.map(str) + '_' + links.j.map(str) + '_' + links.k.map(str)
       links.set_index('link', inplace=True)
-      self.df = self.df.append(links.drop_duplicates())
+      self.df = pd.concat([self.df, links.drop_duplicates()], ignore_index=False)
 
 
   def fix_hydropower_lbs(self):
