@@ -20,16 +20,24 @@ import numpy as np
 import pandas as pd
 
 # %%
+# Get script directory for path resolution (works in both notebook and script mode)
+try:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+except NameError:
+    # Running in interactive mode (Jupyter/IPython)
+    script_dir = os.getcwd()
+
+# %%
 # Load CALVIN library
-calvin_dir = os.path.abspath('../../')
+calvin_dir = os.path.abspath(os.path.join(script_dir, '../../'))
 if str(calvin_dir) not in sys.path:
     sys.path.append(calvin_dir)
 from calvin import *
 
 # %%
 # Model directories
-pf_dir = '../../../my-models/calvin-pf'  # perfect foresight
-lf_dir = '../../../my-models/calvin-lf'  # limited foresight
+pf_dir = os.path.join(script_dir, '../../../my-models/calvin-pf')  # perfect foresight
+lf_dir = os.path.join(script_dir, '../../../my-models/calvin-lf')  # limited foresight
 
 # %%
 # Load perfect foresight links
@@ -66,7 +74,7 @@ inflows.insert(1, 'flow_taf', value=inflow_qwry['lower_bound'].values)
 
 # %%
 # Save inflows to CSV
-inflows.to_csv('inflows.csv')
+inflows.to_csv(os.path.join(script_dir, 'inflows.csv'))
 
 # %%
 # ## Extract variable constraints
@@ -120,7 +128,7 @@ variable_constraints = pd.concat([variable_constraints, variable_constraints_sto
 # %%
 # Save variable constraints to CSV
 variable_constraints = variable_constraints[['date', 'i', 'j', 'k', 'lower_bound', 'upper_bound']]
-variable_constraints.to_csv('variable-constraints.csv', index=False)
+variable_constraints.to_csv(os.path.join(script_dir, 'variable-constraints.csv'), index=False)
 
 # %%
 # ## Define reservoir types and parameters
@@ -139,16 +147,6 @@ r_type2 = ['GW_01', 'GW_02', 'GW_03', 'GW_04', 'GW_05', 'GW_06', 'GW_07',
            'GW_08', 'GW_09', 'GW_10', 'GW_11', 'GW_12', 'GW_13', 'GW_14', 'GW_15',
            'GW_16', 'GW_17', 'GW_18', 'GW_19', 'GW_20', 'GW_21',
            'GW_AV', 'GW_CH', 'GW_EW', 'GW_IM', 'GW_MJ', 'GW_MWD', 'GW_OW', 'GW_SBV', 'GW_SC', 'GW_SD', 'GW_VC']
-
-# Type 2 fixed: Groundwater basins with fixed penalties (9 basins)
-# r_type2_fixed = ['GW_MWD', 'GW_OW', 'GW_SBV', 'GW_SC', 'GW_SD', 'GW_VC',
-#                  'GW_CH', 'GW_EW', 'GW_IM']
-
-# r_type2_fixed_costs = {'GW_MWD': -659, 'GW_OW': -729, 'GW_SBV': -1013, 'GW_SC': -452, 'GW_SD': -1206,
-#                        'GW_VC': -1983, 'GW_CH': -71, 'GW_EW': -1115, 'GW_IM': -1}
-
-# r_type2_fixed_init = {'GW_MWD': 750, 'GW_OW': 30000, 'GW_SBV': 2500, 'GW_SC': 425, 'GW_SD': 7000,
-#                       'GW_VC': 275, 'GW_CH': 3500, 'GW_EW': 7000, 'GW_IM': 930}   
 
 # %%
 # Build reservoir dictionary for CALVIN limited foresight model
@@ -187,7 +185,7 @@ for r in r_list:
 
 # %%
 # Save reservoir dictionary to JSON
-with open('r-dict.json', 'w') as json_file:
+with open(os.path.join(script_dir, 'r-dict.json'), 'w') as json_file:
     json.dump(r_dict, json_file, sort_keys=False, indent=4, separators=(',', ': '))
 
 # %%
@@ -206,13 +204,12 @@ cosvf_pminmax.insert(1, 'param', value=['p'] * len(rtype2_list) + param * len(rt
 
 # %%
 # Save default COSVF parameters
-cosvf_pminmax.to_csv(os.path.join(lf_dir, 'cosvf-params.csv'), index=False)
-
-# %% [markdown]
+cosvf_pminmax.to_csv(os.path.join(script_dir, 'cosvf-params.csv'), index=False)
 
 # %%
+# ## Process baseline links file
 # Load default links and add node/edge columns
-links = pd.read_csv('links_default.csv')
+links = pd.read_csv(os.path.join(script_dir, 'links_default.csv'))
 links.insert(0, 'edge',
     value=links.i.str.split('.').str[0] + '_' + links.j.str.split('.').str[0])
 links.insert(1, 'i_node',
@@ -243,35 +240,28 @@ r_type1_concat = [x + '_' + x for x in r_type1]
 links = links.loc[~links.edge.isin(r_type1_concat)]
 links = pd.concat([links, links_storages_k0])   
 
-# %%
-# Process Type 2 fixed groundwater storage links
-links_gw_storages = links.loc[
-    (links.i_node.isin(r_type2_fixed)) & (links.j_node == 'FINAL')].copy()
+# set links initial storage to match r_dict
+initial_links = links.loc[links.i_node.str.startswith('INITIAL')]
+for idx, row in initial_links.iterrows():
+    r = row.j_node.split('.')[0]
+    if r in r_dict:
+        links.at[idx, 'lower_bound'] = r_dict[r]['eop_init']
+        links.at[idx, 'upper_bound'] = r_dict[r]['eop_init']
 
-links_gw_storages['k'] = 1
+# set links final storage to match r_dict lb and ub
+final_links = links.loc[links.j_node.str.startswith('FINAL')]
+for idx, row in final_links.iterrows():
+    r = row.i_node.split('.')[0]
+    if r in r_dict:
+        links.at[idx, 'lower_bound'] = r_dict[r]['lb']
+        links.at[idx, 'upper_bound'] = r_dict[r]['ub']
 
-def apply_ub(df):
-    """Calculate available groundwater storage capacity."""
-    df.upper_bound = pf_links.loc[
-        (pf_links.i_node == df.i_node) & (pf_links.j_node == df.i_node) &
-        (pf_links.month == 9) & (pf_links.year == 1922)].upper_bound.sum() - \
-        pf_links.loc[(pf_links.i_node == 'INITIAL') & (pf_links.j_node == df.i_node)].lower_bound.values[0]
-    return df
-
-links_gw_storages = links_gw_storages.apply(apply_ub, axis=1)
-links_gw_storages['lower_bound'] = 0
-
-# %%
-# Apply fixed costs and initial values to groundwater links
-# mask_gw_final = (links.i_node.isin(r_type2_fixed)) & (links.j_node == 'FINAL')
-# links.loc[mask_gw_final, 'cost'] = links.loc[links.j_node == 'FINAL'].i_node.map(r_type2_fixed_costs)
-# links.loc[mask_gw_final, 'upper_bound'] = links.loc[links.j_node == 'FINAL'].i_node.map(r_type2_fixed_init)
-
-# Add processed groundwater storage links
-links = pd.concat([links, links_gw_storages])
-# links.loc[mask_gw_final, 'lower_bound'] = 0
+# set sink to sink links to have cost 0.1
+sink_links = links.loc[links.i_node.str.startswith('SINK')]
+for idx, row in sink_links.iterrows():
+    links.at[idx, 'cost'] = 0.01
 
 # %%
 # Save final links file
-links[['i', 'j', 'k', 'cost', 'amplitude', 'lower_bound', 'upper_bound']].to_csv('links.csv', index=False)
+links[['i', 'j', 'k', 'cost', 'amplitude', 'lower_bound', 'upper_bound']].to_csv(os.path.join(script_dir, 'links.csv'), index=False)
 
