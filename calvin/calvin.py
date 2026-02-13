@@ -252,22 +252,30 @@ class CALVIN():
     model.source = Param(initialize='SOURCE', within=Any)
     model.sink = Param(initialize='SINK', within=Any)
 
-    def init_params(p):
-      if p == 'cost' and debug_mode and cosvf_mode is True:
-        return (lambda model,i,j,k: debug_cost 
-                  if ('DBUG' in str(i)+'_'+str(j))
-                  else df.loc[str(i)+'_'+str(j)+'_'+str(k)][p])
-      elif p == 'cost' and debug_mode:
-        return (lambda model,i,j,k: debug_cost 
-                  if ('DBUG' in str(i)+'_'+str(j))
-                  else 1.0)
+    # Pre-build parameter dicts for fast O(1) lookup (avoids repeated string concat + df.loc)
+    link_set = set(self.links)
+    ub_dict = {}
+    lb_dict = {}
+    amp_dict = {}
+    cost_dict = {}
+    for row in df.itertuples():
+      key = (row.i, row.j, row.k)
+      if key not in link_set:
+        continue
+      ub_dict[key] = row.upper_bound
+      lb_dict[key] = row.lower_bound
+      amp_dict[key] = row.amplitude
+      if debug_mode and ('DBUG' in str(row.i) + '_' + str(row.j)):
+        cost_dict[key] = debug_cost
+      elif debug_mode and not cosvf_mode:
+        cost_dict[key] = 1.0
       else:
-        return lambda model,i,j,k: df.loc[str(i)+'_'+str(j)+'_'+str(k)][p]
+        cost_dict[key] = row.cost
 
-    model.u = Param(model.A, initialize=init_params('upper_bound'), mutable=True)
-    model.l = Param(model.A, initialize=init_params('lower_bound'), mutable=True)
-    model.a = Param(model.A, initialize=init_params('amplitude'))
-    model.c = Param(model.A, initialize=init_params('cost'), mutable=True)
+    model.u = Param(model.A, initialize=ub_dict, mutable=True)
+    model.l = Param(model.A, initialize=lb_dict, mutable=True)
+    model.a = Param(model.A, initialize=amp_dict)
+    model.c = Param(model.A, initialize=cost_dict, mutable=True)
 
     # The flow over each arc
     model.X = Var(model.A, within=Reals)
@@ -287,27 +295,16 @@ class CALVIN():
       return model.X[i,j,k] >= model.l[i,j,k]
     model.limit_lower = Constraint(model.A, rule=limit_rule_lower)
 
-    # To speed up creating the mass balance constraints, first
-    # create dictionaries of arcs_in and arcs_out of every node
-    # These are NOT Pyomo data, and Pyomo does not use "model._" at all
+    # Build arc_in/arc_out dicts in pure Python (no Pyomo overhead)
     arcs_in = {}
     arcs_out = {}
-
-    def arc_list_hack(model, i,j,k):
-      if j not in arcs_in:
-        arcs_in[j] = []
-      arcs_in[j].append((i,j,k))
-
-      if i not in arcs_out:
-        arcs_out[i] = []
-      arcs_out[i].append((i,j,k))
-      return [0]
-
-    model._ = Set(model.A, initialize=arc_list_hack)
+    for i, j, k in self.links:
+      arcs_in.setdefault(j, []).append((i, j, k))
+      arcs_out.setdefault(i, []).append((i, j, k))
 
     # Enforce flow through each node (mass balance)
     def flow_rule(model, node):
-      if node in [value(model.source), value(model.sink)]:
+      if node in ('SOURCE', 'SINK'):
           return Constraint.Skip
       outflow  = sum(model.X[i,j,k]/model.a[i,j,k] for i,j,k in arcs_out[node])
       inflow = sum(model.X[i,j,k] for i,j,k in arcs_in[node])
@@ -337,6 +334,9 @@ class CALVIN():
 
     if nproc > 1 and solver != 'glpk':
       opt.options['threads'] = nproc
+
+    if solver == 'cplex':
+      opt.options['lpmethod'] = 4  # Barrier without crossover
     
     if debug_mode:
       run_again = True
@@ -359,12 +359,16 @@ class CALVIN():
 
     else:
       self.log.info('-----Solving Pyomo Model (debug=%s)' % debug_mode)
-      self.results = opt.solve(self.model, tee=False)
+      self.results = opt.solve(self.model, tee=True, load_solutions=False)
 
       if self.results.solver.termination_condition == TerminationCondition.optimal:
         self.log.info('Optimal Solution Found (debug=%s).' % debug_mode)
         self.model.solutions.load_from(self.results)
       else:
+        self.log.error('Solver status: %s' % self.results.solver.status)
+        self.log.error('Termination condition: %s' % self.results.solver.termination_condition)
+        if self.results.solution:
+          self.log.error('Solution status: %s' % self.results.solution.status)
         raise RuntimeError('Problem Infeasible. Run again starting from debug mode.')
 
 
