@@ -1,16 +1,23 @@
 import os
 import sys
 import logging
+import datetime
 
 from pyomo.environ import *
 from pyomo.opt import TerminationCondition
 import numpy as np
 import pandas as pd
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-def setup_logger(log_name, savedir=None):
+
+def setup_logger(log_name, savedir=None, console_level=logging.INFO):
   """
   Create the logger
+
+  :param console_level: (int) logging level for the console handler (default INFO).
+    Pass ``logging.WARNING`` in EA worker processes to suppress per-solve console
+    noise while still writing full DEBUG output to the log file.
   """
   if savedir is not None:
     log_name = os.path.join(savedir,log_name)
@@ -18,12 +25,13 @@ def setup_logger(log_name, savedir=None):
   if not logger.hasHandlers():  # hasHandlers will only be True if someone already called CALVIN with the same log_name in the same session
     logger.setLevel("DEBUG")
     screen_handler = logging.StreamHandler(sys.stdout)
-    screen_handler.setLevel(logging.INFO)
+    screen_handler.setLevel(console_level)
     screen_formatter = logging.Formatter('%(levelname)s - %(message)s')
     screen_handler.setFormatter(screen_formatter)
     logger.addHandler(screen_handler)
 
-    file_handler = logging.FileHandler("{}.log".format(log_name))
+    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    file_handler = logging.FileHandler("{}.{}.log".format(log_name, timestamp))
     file_handler.setLevel(logging.DEBUG)
     file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     file_handler.setFormatter(file_formatter)
@@ -33,28 +41,26 @@ def setup_logger(log_name, savedir=None):
 
 class CALVIN():
 
-  def __init__(self, linksfile, ic=None, log_name="calvin"):
+  def __init__(self, linksfile, ic=None, log_name="calvin", logdir=None):
     """
     Initialize CALVIN model object.
 
     :param linksfile: (string) CSV file containing network link information
     :param ic: (dict) Initial storage conditions for surface reservoirs
                 only used for annual optimization
-    :param log_name: A name for a logger - will be used to keep logs from different model runs separate in files.
-                Defaults to "calvin", which results in a log file in the current working directory named "calvin.log".
-                You can change this each time you instantiate the CALVIN class if you want to output separate logs
-                for different runs. Otherwise, all results will be appended to the log file (not overwritten). If you
-                run multiple copies of CALVIN simultaneously, make sure to change this, or you could get errors writing
-                to the log file.
-
-                Do not provide a full path to a log file here because this value is also used in a way that is *not* a
-                file path. If being able to specify a full path is important for your workflow, please raise a GitHub
-                issue. It could be supported, but there is no need at this moment.
+    :param log_name: (string) Logger name; used as the log filename stem.
+                Defaults to "calvin" → writes calvin.log in logdir (or cwd).
+    :param logdir: (string) Directory to write the log file. Defaults to the
+                directory containing linksfile.
     :returns: CALVIN model object
     """
 
-    # set up logging code
-    self.log = setup_logger(log_name)
+    # Default logdir to the directory containing the linksfile
+    if logdir is None:
+      logdir = os.path.dirname(os.path.abspath(linksfile))
+    if not os.path.isdir(logdir):
+      os.makedirs(logdir)
+    self.log = setup_logger(log_name, savedir=logdir)
 
     df = pd.read_csv(linksfile)
     df['link'] = df.i.map(str) + '_' + df.j.map(str) + '_' + df.k.map(str)
@@ -63,8 +69,7 @@ class CALVIN():
     self.df = df
     self.linksfile = os.path.splitext(linksfile)[0] # filename w/o extension
 
-    # self.T = len(self.df)
-    SR_stats = pd.read_csv('calvin/data/SR_stats.csv', index_col=0).to_dict()
+    SR_stats = pd.read_csv(os.path.join(BASE_DIR, 'data', 'SR_stats.csv'), index_col=0).to_dict()
     self.min_storage = SR_stats['min']
     self.max_storage = SR_stats['max']
 
@@ -73,11 +78,13 @@ class CALVIN():
 
     # a few network fixes to make things work
     self.add_ag_region_sinks()
-    self.fix_hydropower_lbs()
 
-    self.nodes = pd.unique(df[['i','j']].values.ravel()).tolist()
-    self.links = list(zip(df.i,df.j,df.k))
+    self.nodes = pd.unique(self.df[['i','j']].values.ravel()).tolist()
+    self.links = list(zip(self.df.i, self.df.j, self.df.k))
     self.networkcheck() # make sure things aren't broken
+
+    # Snapshot bounds after all initialization; used by get_bound_adjustments()
+    self._initial_bounds = self.df[['lower_bound', 'upper_bound']].copy()
     
 
   def apply_ic(self, ic):
@@ -184,27 +191,27 @@ class CALVIN():
       links.upper_bound = maxub
       links['link'] = links.i.map(str) + '_' + links.j.map(str) + '_' + links.k.map(str)
       links.set_index('link', inplace=True)
-      self.df = self.df._append(links.drop_duplicates())
+      self.df = pd.concat([self.df, links.drop_duplicates()])
 
 
-  def fix_hydropower_lbs(self):
+  def get_bound_adjustments(self):
     """
-    Hack to fix lower bound constraints on piecewise hydropower links.
-    Storage piecewise links > 0 should have 0.0 lower bound, and
-    the k=0 pieces should always have lb = dead pool.
+    Return a dataframe of links whose bounds were modified by fix_debug_flows,
+    showing the initial and final lower/upper bounds and the net delta.
 
-    :returns: nothing, but modifies the model object
+    :returns: DataFrame with columns i, j, k, lb_init, lb_final, lb_delta,
+              ub_init, ub_final, ub_delta — only rows where at least one bound changed.
     """
-    def get_lb(link):
-      if link.i.split('.')[0] == link.j.split('.')[0]:
-        if link.k > 0:
-          return 0.0
-        elif link.i.split('.')[0] in self.min_storage:
-          return min(self.min_storage[link.i.split('.')[0]], link.lower_bound)
-      return link.lower_bound
-
-    ix = (self.df.i.str.contains('SR_') & self.df.j.str.contains('SR_'))
-    self.df.loc[ix, 'lower_bound'] = self.df.loc[ix].apply(get_lb, axis=1)
+    cur = self.df[['i', 'j', 'k', 'lower_bound', 'upper_bound']].copy()
+    cur = cur.join(self._initial_bounds.rename(
+        columns={'lower_bound': 'lb_init', 'upper_bound': 'ub_init'}))
+    cur['lb_final'] = cur['lower_bound']
+    cur['ub_final'] = cur['upper_bound']
+    cur['lb_delta'] = cur['lb_final'] - cur['lb_init']
+    cur['ub_delta'] = cur['ub_final'] - cur['ub_init']
+    changed = cur[(cur['lb_delta'] != 0) | (cur['ub_delta'] != 0)]
+    return changed[['i', 'j', 'k', 'lb_init', 'lb_final', 'lb_delta',
+                    'ub_init', 'ub_final', 'ub_delta']].copy()
 
   def remove_debug_links(self):
     """
@@ -316,7 +323,7 @@ class CALVIN():
     self.model = model
 
 
-  def solve_pyomo_model(self, solver='glpk', nproc=1, debug_mode=False, maxiter=10):
+  def solve_pyomo_model(self, solver='highs', nproc=1, debug_mode=False, maxiter=10):
     """
     Solve Pyomo model (must be called after create_pyomo_model)
     
@@ -342,20 +349,33 @@ class CALVIN():
       run_again = True
       i = 0
       vol_total = 0
+      prev_debug = float('inf')
+      stalled = False
 
       while run_again and i < maxiter:
         self.log.info('-----Solving Pyomo Model (debug=%s)' % debug_mode)
         self.results = opt.solve(self.model)
         self.log.info('Finished. Fixing debug flows...')
-        run_again,vol = self.fix_debug_flows()
+        run_again, vol, total_debug = self.fix_debug_flows()
         i += 1
         vol_total += vol
 
-      if run_again:
-        self.log.info(('Warning: Debug mode maximum iterations reached.'
-               ' Will still try to solve without debug mode.'))
+        if run_again and total_debug >= prev_debug * 0.99:
+          stalled = True
+          break
+        prev_debug = total_debug
+
+      if not run_again:
+        self.log.info('All debug flows eliminated (iter=%d, vol=%0.2f)' % (i, vol_total))
+        return True
+      elif stalled:
+        self.log.warning('Debug stalled at %.2e TAF after %d iterations; '
+                         'no further improvement possible.' % (total_debug, i))
+        return False
       else:
-        self.log.info('All debug flows eliminated (iter=%d, vol=%0.2f)' % (i,vol_total))
+        self.log.warning('Debug mode maximum iterations reached (%d); '
+                         '%.2e TAF of debug flows remain.' % (maxiter, total_debug))
+        return False
 
     else:
       self.log.info('-----Solving Pyomo Model (debug=%s)' % debug_mode)
@@ -364,100 +384,165 @@ class CALVIN():
       if self.results.solver.termination_condition == TerminationCondition.optimal:
         self.log.info('Optimal Solution Found (debug=%s).' % debug_mode)
         self.model.solutions.load_from(self.results)
+        return True
       else:
         self.log.error('Solver status: %s' % self.results.solver.status)
         self.log.error('Termination condition: %s' % self.results.solver.termination_condition)
         if self.results.solution:
           self.log.error('Solution status: %s' % self.results.solution.status)
+        self._log_iis()
         raise RuntimeError('Problem Infeasible. Run again starting from debug mode.')
 
+
+  def _log_iis(self):
+    """
+    Write the current Pyomo model to a temp LP file, re-solve with HiGHS directly,
+    and log the Irreducible Infeasible Subsystem (IIS) — the minimal set of conflicting
+    constraints — to help diagnose the root cause of infeasibility.
+
+    Requires ``highspy`` to be installed. Silently skips if not available.
+    """
+    try:
+      import highspy
+    except ImportError:
+      self.log.warning('highspy not available; skipping IIS analysis.')
+      return
+    import tempfile
+
+    # Write the Pyomo model to a temp LP with symbolic names so HiGHS
+    # column/row names map back to our network link/node names.
+    tmp = tempfile.NamedTemporaryFile(suffix='.lp', delete=False)
+    tmp.close()
+    try:
+      self.model.write(tmp.name, io_options={'symbolic_solver_labels': True})
+
+      h = highspy.Highs()
+      h.setOptionValue('output_flag', False)
+      # Use Irreducible strategy: FromRay (default) fails when bounds are
+      # expressed as constraint rows rather than column bounds (Pyomo's format).
+      h.setOptionValue('iis_strategy',
+                       int(highspy._core.kIisStrategyIrreducible))
+      h.readModel(tmp.name)
+      h.run()
+
+      if h.getModelStatus() != highspy.HighsModelStatus.kInfeasible:
+        self.log.warning('IIS solver did not confirm infeasibility; skipping IIS.')
+        return
+
+      iis_status, iis = h.getIis()
+      if iis_status != highspy.HighsStatus.kOk or not iis.valid_:
+        self.log.warning('IIS computation failed or returned invalid result.')
+        return
+
+      UPPER = int(highspy._core.kIisBoundStatusUpper)
+
+      lp = h.getLp()
+      col_names = lp.col_names_
+      row_names = lp.row_names_
+
+      self.log.error('--- IIS: %d conflicting variable bounds, %d conflicting constraints ---'
+                     % (len(iis.col_index_), len(iis.row_index_)))
+
+      def _log_iis_items(indices, bounds, names, label):
+        for idx, bound_status in zip(indices, bounds):
+          bound = 'UB' if bound_status == UPPER else 'LB'
+          name  = names[idx] if idx < len(names) else str(idx)
+          self.log.error('  %s %s (%s)' % (label, name, bound))
+
+      _log_iis_items(iis.col_index_, iis.col_bound_, col_names, 'Variable')
+      _log_iis_items(iis.row_index_, iis.row_bound_, row_names, 'Constraint')
+
+    finally:
+      os.unlink(tmp.name)
+
+
+  def _raise_upper_bounds(self, dbl, df, model, flow_val):
+    """Raise UB on all outgoing links from a DBUGSNK node to relieve surplus water."""
+    vol = 0
+    raiselinks = df[(df.i == dbl[0]) & ~df.j.str.contains('DBUGSNK')].values
+    for l in raiselinks:
+      s2 = tuple(l[0:3])
+      iv = model.u[s2].value
+      v = flow_val * 1.2
+      model.u[s2].value += v
+      vol += v
+      self.log.info('%s UB raised by %0.2f (%0.2f%%)' % (l[0] + '_' + l[1], v, v * 100 / iv))
+      df.loc['_'.join(str(x) for x in l[0:3]), 'upper_bound'] = model.u[s2].value
+    return vol
+
+  def _lower_downstream_bounds(self, dbl, df, model, flow_val, max_depth=10):
+    """Reduce LB on downstream links of a DBUGSRC node to relieve deficit water."""
+    vol_to_reduce = max(flow_val * 1.2, 0.5)
+    self.log.info('Volume to reduce: %.2e' % vol_to_reduce)
+
+    children = [dbl[1]]
+    for _ in range(max_depth):
+      children += df[df.i.isin(children) & ~df.j.str.contains('DBUGSNK')].j.tolist()
+    children = set(children)
+
+    reducelinks = (df[df.i.isin(children) & (df.lower_bound > 0)]
+                   .sort_values(by='lower_bound', ascending=False).values)
+    if reducelinks.size == 0:
+      raise RuntimeError('Not possible to reduce LB on links with origin %s by volume %0.2f'
+                         % (dbl[1], vol_to_reduce))
+
+    carryover = ['SR_', 'INITIAL', 'FINAL', 'GW_']
+    vol = 0
+    for l in reducelinks:
+      if vol_to_reduce == 0:
+        break
+      s2 = tuple(l[0:3])
+      iv = model.l[s2].value
+      dl = model.dual[model.limit_lower[s2]] if s2 in model.limit_lower else 0.0
+      if iv > 0 and dl > 1e6:
+        v = min(vol_to_reduce, iv)
+        if any(c in l[0] for c in carryover) and any(c in l[1] for c in carryover):
+          v = min(v, max(25.0, 0.1 * iv))
+        model.l[s2].value -= v
+        vol_to_reduce -= v
+        vol += v
+        self.log.info('%s LB reduced by %.2e (%0.2f%%). Dual=%.2e'
+                      % (l[0] + '_' + l[1], v, v * 100 / iv, dl))
+        df.loc['_'.join(str(x) for x in l[0:3]), 'lower_bound'] = model.l[s2].value
+
+    if vol_to_reduce > 0:
+      self.log.info('Debug -> %s: could not reduce full amount (%.2e left)' % (dbl[1], vol_to_reduce))
+    return vol
 
   def fix_debug_flows(self, tol=1e-7):
     """
     Find infeasible constraints where debug flows occur.
-    Fix them by either raising the UB, or lowering the LB.
-    
+    Fix them by either raising the UB (DBUGSNK) or lowering the LB (DBUGSRC).
+
     :param tol: (float) Tolerance to identify nonzero debug flows
     :returns run_again: (boolean) whether debug mode needs to run again
     :returns vol: (float) total volume of constraint changes
+    :returns total_debug: (float) total debug flow volume in this iteration
       also modifies the model object.
     """
-
     df, model = self.df, self.model
     dbix = (df.i.str.contains('DBUGSRC') | df.j.str.contains('DBUGSNK'))
     debuglinks = df[dbix].values
+
+    total_debug = sum(max(model.X[tuple(dbl[0:3])].value or 0, 0) for dbl in debuglinks)
 
     run_again = False
     vol_total = 0
 
     for dbl in debuglinks:
       s = tuple(dbl[0:3])
+      flow_val = model.X[s].value
+      if flow_val <= tol:
+        continue
 
-      if model.X[s].value > tol:
-        run_again = True
-
-        # if we need to get rid of extra water,
-        # raise some upper bounds (just do them all)
-        if 'DBUGSNK' in dbl[1]:
-          raiselinks = df[(df.i == dbl[0]) & ~ df.j.str.contains('DBUGSNK')].values
-
-          for l in raiselinks:
-            s2 = tuple(l[0:3])
-            iv = model.u[s2].value
-            v = model.X[s].value*1.2
-            model.u[s2].value += v
-            vol_total += v
-            self.log.info('%s UB raised by %0.2f (%0.2f%%)' % (l[0]+'_'+l[1], v, v*100/iv))
-            df.loc['_'.join(str(x) for x in l[0:3]), 'upper_bound'] = model.u[s2].value
-
-        # if we need to bring in extra water
-        # this is a much more common problem
-        # want to avoid reducing carryover requirements. look downstream instead.
-        max_depth = 10
-
-        if 'DBUGSRC' in dbl[0]:
-          vol_to_reduce = max(model.X[s].value*1.2, 0.5)
-          self.log.info('Volume to reduce: %.2e' % vol_to_reduce)
-
-          children = [dbl[1]]
-          for i in range(max_depth):
-            children += df[df.i.isin(children)
-                           & ~ df.j.str.contains('DBUGSNK')].j.tolist()
-          children = set(children)
-          reducelinks = (df[df.i.isin(children)
-                           & (df.lower_bound > 0)]
-                         .sort_values(by='lower_bound', ascending=False).values)
-
-          if reducelinks.size == 0:
-            raise RuntimeError(('Not possible to reduce LB on links'
-                                ' with origin %s by volume %0.2f' % 
-                                (dbl[1],vol_to_reduce)))
-
-          for l in reducelinks:
-            s2 = tuple(l[0:3])
-            iv = model.l[s2].value
-            dl = model.dual[model.limit_lower[s2]] if s2 in model.limit_lower else 0.0
-
-            if iv > 0 and vol_to_reduce > 0 and dl > 1e6:
-              v = min(vol_to_reduce, iv)
-              # don't allow big reductions on carryover links
-              carryover = ['SR_', 'INITIAL', 'FINAL', 'GW_']
-              if any(c in l[0] for c in carryover) and any(c in l[1] for c in carryover): 
-                v = min(v, max(25.0, 0.1*iv))
-              model.l[s2].value -= v
-              vol_to_reduce -= v
-              vol_total += v
-              self.log.info('%s LB reduced by %.2e (%0.2f%%). Dual=%.2e' % (l[0]+'_'+l[1], v, v*100/iv, dl))
-              df.loc['_'.join(str(x) for x in l[0:3]), 'lower_bound'] = model.l[s2].value
-              
-            if vol_to_reduce == 0:
-              break
-
-          if vol_to_reduce > 0:
-            self.log.info('Debug -> %s: could not reduce full amount (%.2e left)' % (dbl[1],vol_to_reduce))
+      run_again = True
+      if 'DBUGSNK' in dbl[1]:
+        vol_total += self._raise_upper_bounds(dbl, df, model, flow_val)
+      elif 'DBUGSRC' in dbl[0]:
+        vol_total += self._lower_downstream_bounds(dbl, df, model, flow_val)
 
     self.df, self.model = df, model
-    return run_again, vol_total
+    return run_again, vol_total, total_debug
 
   def model_to_dataframe(self):
       """
@@ -467,33 +552,21 @@ class CALVIN():
       :returns model_df: (Pandas dataframe) Dataframe of upper_bound, cost, 
         and flow (solution) values for each link
       """
+      def _param_series(param, col):
+        keys = list(param.keys())
+        return pd.DataFrame(
+          [(i, j, k, param[i, j, k].value) for i, j, k in keys],
+          columns=['i', 'j', 'k', col]
+        ).set_index(['i', 'j', 'k'])
+
       m = self.model
-      # dataframe of the model flows
-      model_x = pd.concat(axis=1, objs=[
-        pd.DataFrame(m.X.keys(), columns=['i','j','k']),
-        pd.DataFrame([m.X[value].value for value in m.X.keys()], 
-          columns=['flow'])]).set_index(['i','j','k'])
-      
-      # dataframe of the model upper bounds
-      model_l = pd.concat(axis=1, objs=[
-        pd.DataFrame(m.l.keys(), columns=['i','j','k']),
-        pd.DataFrame([m.l[value].value for value in m.l.keys()], 
-          columns=['lower_bound'])]).set_index(['i','j','k'])
-
-      # dataframe of the model upper bounds
-      model_u = pd.concat(axis=1, objs=[
-        pd.DataFrame(m.u.keys(), columns=['i','j','k']),
-        pd.DataFrame([m.u[value].value for value in m.u.keys()], 
-          columns=['upper_bound'])]).set_index(['i','j','k'])
-
-      # dataframe of the model costs
-      model_c = pd.concat(axis=1, objs=[
-        pd.DataFrame(m.c.keys(), columns=['i','j','k']),
-        pd.DataFrame([m.c[value].value for value in m.c.keys()], 
-          columns=['cost'])]).set_index(['i','j','k'])
-
-      # join together flows, costs, and bounds
-      model_df = model_x.join(model_c, how='inner').join(model_l).join(model_u).reset_index()
+      model_df = (
+        _param_series(m.X, 'flow')
+        .join(_param_series(m.c, 'cost'), how='inner')
+        .join(_param_series(m.l, 'lower_bound'))
+        .join(_param_series(m.u, 'upper_bound'))
+        .reset_index()
+      )
       model_df['link'] = model_df.i.map(str) + '-' + model_df.j.map(str) + '-' + model_df.k.map(str)
       model_df.set_index('link', inplace=True)
 

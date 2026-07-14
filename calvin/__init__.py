@@ -1,4 +1,9 @@
-__version__ = "2020.08.14"
+__version__ = "2026.02.10"
 
-from .calvin import CALVIN
-from .postprocessor import postprocess, aggregate_regions
+try:
+    from .calvin import CALVIN
+    from .postprocessor import postprocess, aggregate_regions, combine_annual_results
+except ImportError:
+    pass  # pyomo not available (e.g. when running the web app only)
+
+from .network import load_network, build_matrix, export_matrix

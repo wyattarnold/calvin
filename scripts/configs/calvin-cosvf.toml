@@ -1,0 +1,17 @@
+# Default configuration for calvin-cosvf.py
+# This file is copied to my-models/calvin-cosvf/config.toml on first run.
+# Edit the model-dir copy to customise a specific experiment.
+
+[run]
+solver    = "highs"
+nproc     = 1
+data_path = "../calvin-network-data/data"
+
+[network]
+# Small negative cost applied to SR k=0 carryover links to gently persuade
+# the solver to carry water forward rather than leave storage empty.
+storage_persuasion_cost = -0.02
+# Cost applied to SINK/OUTBOUND connector links to discourage unnecessary flow.
+connector_cost = 0.01
+# Per-node lower bound overrides (TAF).
+[network.node_lb_overrides]

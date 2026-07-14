@@ -1,0 +1,22 @@
+@import "tailwindcss";
+
+/* Ensure the map fills its container */
+.leaflet-container {
+  width: 100%;
+  height: 100%;
+  background: #111827;
+}
+
+/* Custom Leaflet tooltip */
+.calvin-tooltip {
+  background: #111827 !important;
+  border: 1px solid #374151 !important;
+  color: #e5e7eb !important;
+  font-size: 11px !important;
+  padding: 4px 8px !important;
+  border-radius: 4px !important;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.5) !important;
+}
+.calvin-tooltip::before {
+  display: none !important;
+}

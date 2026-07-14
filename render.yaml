@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: calvin-network-app
+    runtime: python
+    plan: free
+    rootDir: calvin/app
+    buildCommand: bash ./build.sh
+    startCommand: python -m calvin.app serve --hosted --host 0.0.0.0 --port $PORT

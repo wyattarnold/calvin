@@ -1,6 +1,6 @@
-import os, shutil, re, itertools, json, pickle
-import argparse
+import os, json, pickle
 import logging
+import tempfile, shutil
 import numpy as np
 import pandas as pd
 import math, copy, random
@@ -10,108 +10,188 @@ from deap.base import Fitness
 from deap.base import Toolbox
 from .calvin import *
 from .postprocessor import *
+from .postprocessor import _collect_links
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+# ---------------------------------------------------------------------------
+# Solver helpers
+# ---------------------------------------------------------------------------
+
+def _init_cosvf_solver(solver, nproc, log):
+    """Initialize solver for the COSVF annual sequence.
+
+    For Gurobi, CPLEX, and HiGHS, attempts to use Pyomo's APPSI persistent
+    interface.  APPSI keeps the LP resident in the solver's in-memory
+    representation between years and only pushes changed bounds/costs as
+    deltas, eliminating LP-file I/O and full model re-builds on each year.
+
+    Falls back to a standard ``SolverFactory`` for all other solvers (CBC,
+    GLPK) and whenever APPSI is unavailable.
+
+    Returns
+    -------
+    opt
+        Solver object (APPSI or ``SolverFactory`` instance).
+    is_appsi : bool
+        ``True`` if *opt* is an APPSI persistent solver.
+    """
+    _appsi_map = {'gurobi': 'Gurobi', 'cplex': 'Cplex', 'highs': 'Highs'}
+
+    if solver in _appsi_map:
+        try:
+            from pyomo.contrib import appsi
+            opt = getattr(appsi.solvers, _appsi_map[solver])()
+            if opt.available():
+                log.info('COSVF: using APPSI persistent interface for %s', solver)
+                # Dual simplex is ideal for warm-started problems where only
+                # bounds change between solves (primal stays feasible).
+                if solver == 'gurobi':
+                    opt.gurobi_options['Method'] = 1     # dual simplex
+                    if nproc > 1:
+                        opt.gurobi_options['Threads'] = nproc
+                elif solver == 'cplex':
+                    opt.cplex_options['lpmethod'] = 2    # dual simplex
+                    if nproc > 1:
+                        opt.cplex_options['threads'] = nproc
+                elif solver == 'highs':
+                    opt.highs_options['simplex_strategy'] = 3  # dual simplex
+                    opt.highs_options['threads'] = nproc       # always pin threads; prevents HiGHS
+                                                               # from auto-detecting all CPUs on the
+                                                               # machine when nproc=1 in multiworker runs
+                return opt, True
+        except Exception as exc:
+            log.debug('APPSI not available for %s (%s); using SolverFactory', solver, exc)
+
+    # Standard file-based SolverFactory (CBC, GLPK, or fallback)
+    from pyomo.opt import SolverFactory
+    opt = SolverFactory(solver)
+    if nproc > 1 and solver != 'glpk':
+        opt.options['threads'] = nproc
+    log.info('COSVF: using SolverFactory for %s', solver)
+    return opt, False
+
+
+class _PostprocessCollector:
+    """Accumulate COSVF postprocess data across all water years; write CSVs once.
+
+    Replaces 82 × N per-year file-open/close cycles with a single
+    ``save_dict_as_csv`` call per output file after the annual
+    loop completes.  Lookup CSVs (demand_nodes, pwp_nodes, operation_nodes) are
+    loaded once in ``__init__`` rather than once per year.
+    """
+
+    def __init__(self):
+        self.F, self.S, self.E = {}, {}, {}
+        self.SV, self.SC = {}, {}
+        self.PV, self.PC, self.OC = {}, {}, {}
+        self.D_up, self.D_lo, self.D_node = {}, {}, {}
+        self.EOP_storage = {}
+
+        # Load lookup tables once (avoid repeated file reads inside the loop)
+        _demand = pd.read_csv(os.path.join(BASE_DIR, 'data', 'demand_nodes.csv'), index_col=0)
+        _pwp    = pd.read_csv(os.path.join(BASE_DIR, 'data', 'pwp_nodes.csv'),    index_col=0)
+        _op     = pd.read_csv(os.path.join(BASE_DIR, 'data', 'operation_nodes.csv'), index_col=0)
+        self._demand_set = set(_demand.index)
+        self._pwp_set    = set(_pwp.index)
+        self._op_set     = set(_op.index)
+
+    def collect(self, df, model, year):
+        """Collect one water year — delegates link accumulation to _collect_links."""
+        links = df.values
+        nodes = pd.unique(df[['i', 'j']].values.ravel()).tolist()
+
+        _collect_links(
+            links, model, year,
+            self.F, self.S, self.E, self.SV, self.SC, self.PV, self.PC, self.OC,
+            self.D_up, self.D_lo, self.EOP_storage,
+            self._demand_set, self._pwp_set, self._op_set,
+        )
+
+        for node in nodes:
+            if '.' in node:
+                n3, t3 = node.split('.')
+                d3 = model.dual.get(model.flow[node], 0.0) if node in model.flow else 0.0
+                if year is not None and year > 1922:
+                    t3 = t3.replace('1922', str(year)).replace('1921', str(year - 1))
+                dict_insert(self.D_node, n3, t3, d3)
+
+    def write(self, resultdir):
+        """Write all accumulated data to CSV — one file-open per output, mode='w'."""
+        os.makedirs(resultdir, exist_ok=True)
+        things = [
+            (self.F,           'flow'),
+            (self.S,           'storage'),
+            (self.D_up,        'dual_upper'),
+            (self.D_lo,        'dual_lower'),
+            (self.D_node,      'dual_node'),
+            (self.E,           'evaporation'),
+            (self.SV,          'shortage_volume'),
+            (self.SC,          'shortage_cost'),
+            (self.EOP_storage, 'eop_storage'),
+            (self.PV,          'pwp_short_volume'),
+            (self.PC,          'pwp_short_cost'),
+            (self.OC,          'operation_costs'),
+        ]
+        for data, name in things:
+            if data:
+                save_dict_as_csv(data, os.path.join(resultdir, name + '.csv'))
+
 
 ###############################################################################
 ### Limited foresight Carryover storage value function (COSVF) CALVIN model ###
 ###############################################################################
 class COSVF(CALVIN):
   
-  def __init__(self, pwd, log_name="calvin-cosvf"):
+  def __init__(self, pwd, log_name="calvin-cosvf", console_level=logging.INFO):
     """
     Instantiate COSVF model as a child class of ``calvin.CALVIN`` for annual COSVF optimization.
 
-    :param pwd: (string) path to directory containting COSVF links and other required input files:
-      1. ``links.csv``: network for the first water year in the period of analysis.
-          CSV file with column headers: ``i,j,k,cost,amplitude,lower_bound,upper_bound``
-      2. ``cosvf-params.csv``: a csv containing a table of :math:`P_{min}` and :math:`P_{max}` for 
-          quadratic carryover penalty curves on surface water reservoirs and :math:`P_{GW}` 
-          for linear penalty on groundwater reservoirs.
-          CSV file with column headers: ``r,param,value``
-      3.  ``r-dict.json``: dictionary of reservoirs in the network with penalty properties. 
-          Type 2 (linear penalty) reservoirs must be ordered prior to the Type 1 (quadratic) reservoirs.
-          This is a limitation of imposed by the evolutionary algorithm search of the parameters.
-          For each reservoir with an EOP penalty, an index attribute ``cosvf_param_index`` points 
-          to the row-index (pythonic zero-indexed) of the list of reservoirs in ``cosvf-params.csv``.
-          Dictionary structure:
-            .. code-block:: JSON
-              {"<reservoir id (e.g. SR_DNP)>":
-                {
-                  "eop_init": "(float) initial (October 1) storage level",
-                  "lb": "(float) minimum (end-of-September) storage level",
-                  "ub": "(float) maximum (end-of-September) carryover capactiy",
-                  "type": "(int) 0:none; 1:quadratic; or 2:linear",
-                  "cosvf_param_index": "(list) index to cosvf_params.csv row (pythonic zero-indexed)",
-                  "k_count": "(int) number of piecewise links to fit for quadratic COSVF",
-                }
-              }
-      4.  ``inflows.csv``: external inflows for every monthly time step over the period of analysis to run. 
-          CSV file with column headers ``date, j, flow_taf``
-      5.  ``variable-constraints.csv``: links that have variable year-to-year upper and/or lower bounds.
-          CSV file with column headers ``date,i,j,k,lower_bound,upper_bound``
+    :param pwd: (string) path to directory containing COSVF input files.  Generate these
+      files with :func:`calvin.network.prepare.prepare_cosvf` or the CLI equivalent::
+
+        python -m calvin.network.cli prepare-cosvf \\
+            --data /path/to/calvin-network-data/data \\
+            --output ./my-models/calvin-cosvf
+
+      Required files in the directory:
+
+      1. ``links.csv`` — single water-year network matrix
+         (``i,j,k,cost,amplitude,lower_bound,upper_bound``)
+      2. ``cosvf-params.csv`` — penalty parameters (``r,param,value``)
+      3. ``r-dict.json`` — reservoir dictionary with penalty properties
+      4. ``inflows.csv`` — external inflows for the full period (``date,j,flow_taf``)
+      5. ``variable-constraints.csv`` — time-varying link bounds
+         (``date,i,j,k,lower_bound,upper_bound``)
+
+      See :func:`calvin.network.prepare.prepare_cosvf` for details on each file.
+
     :param log_name: (string) name for the global logger. Log file is written to the specified ``pwd`` path.
+    :param console_level: (int) logging level for the console handler (default ``logging.INFO``).
+      Pass ``logging.WARNING`` in EA worker processes to suppress per-solve console output
+      while still writing full DEBUG detail to the log file.
     :returns: COSVF CALVIN model object
     """
     # set working directory
     self.pwd = pwd
 
-    # if COSVF links file does not exist in pwd, copy the default files to the pwd
-    linksfile = os.path.join(self.pwd , 'links.csv')
+    # check that required input files exist
+    linksfile = os.path.join(self.pwd, 'links.csv')
     if not os.path.isfile(linksfile):
-      if not os.path.isdir(self.pwd): os.makedirs(self.pwd)
-      src, dst = os.path.join(BASE_DIR, "data", "cosvf-default"), self.pwd
-      names = os.listdir(src)
-      for name in names:
-        if name.endswith('py') or name.endswith('md') or name.endswith('default.csv'):
-          continue
-        else:
-          shutil.copy2(os.path.join(src, name), os.path.join(dst, name))
+      raise FileNotFoundError(
+        f"COSVF input files not found in {self.pwd}. "
+        "Generate them first with: python -m calvin.network.cli prepare-cosvf "
+        "--data /path/to/calvin-network-data/data --output " + self.pwd
+      )
 
     # set up logging code
-    self.log = setup_logger(log_name, savedir=pwd)
+    self.log = setup_logger(log_name, savedir=pwd, console_level=console_level)
 
-    # load links
-    self.df = pd.read_csv(os.path.join(self.pwd , 'links.csv'))
-    
-    # dictionary of surface and groundwater reservoir nodes
-    with open(os.path.join(self.pwd , 'r-dict.json')) as f: 
-      self.r_dict = json.load(f)
-
-    # COSVF parameter array that matches the order of reservoirs in the r_dict
-    self.pcosvf = np.loadtxt(os.path.join(self.pwd , 'cosvf-params.csv'),
-                            delimiter=',', skiprows=1, usecols=2).tolist()
-
-    # inflows for entire period of analysis
-    inflows = pd.read_csv(os.path.join(self.pwd , 'inflows.csv'), index_col=0, parse_dates=True)
-    self.inflows = inflows.pivot(columns='j', values='flow_taf').rename_axis(None, axis=1)
-    
-    # wy start and end inferred from inflows
-    self.wy_start = int(min(self.inflows.index.year)) + 1
-    self.wy_end = int(max(self.inflows.index.year))
-    
-    # get a list of unique inflow points to loop through later
-    self.inflow_terminals = inflows.j.unique()
-
-    # load time-varying upper and lower bounds for entire period of analysis
-    self.variable_constraints = pd.read_csv(os.path.join(self.pwd , 'variable-constraints.csv'),
-      index_col=0, parse_dates=True)
-
-    # construct placeholder cosvf cost links for the reservoirs
-    self.create_cosvf_links()
-
-    # construct the link index for the model dataframe
-    self.df['link'] = self.df.i.map(str) + '_' + self.df.j.map(str) + '_' + self.df.k.map(str)
-    self.df.set_index('link', inplace=True)
-
-    # SR stats for hydropower checks
-    SR_stats = pd.read_csv(os.path.join(BASE_DIR,'data','SR_stats.csv'), index_col=0).to_dict()
-    self.min_storage = SR_stats['min']
-    self.max_storage = SR_stats['max']
+    self._load_input_files()
 
     # a few network fixes to make things work
     super().add_ag_region_sinks()
-    super().fix_hydropower_lbs()
 
     # lists for unique nodes and links
     self.nodes = pd.unique(self.df[['i','j']].values.ravel()).tolist()
@@ -119,6 +199,38 @@ class COSVF(CALVIN):
 
     # make sure things aren't broken
     super().networkcheck()
+
+    # precompute static link sets for fast per-year fitness evaluation
+    self._precompute_fitness_links()
+
+    # precompute model-update data (inflow keys/matrix, VC entries, EOP keys)
+    self._precompute_update_data()
+
+
+  def _load_input_files(self):
+    """Load all COSVF input files from self.pwd and build the link dataframe."""
+    self.df = pd.read_csv(os.path.join(self.pwd, 'links.csv'))
+
+    with open(os.path.join(self.pwd, 'r-dict.json')) as f:
+      self.r_dict = json.load(f)
+    self.nrtype1 = sum(1 for v in self.r_dict.values() if v.get('type') == 1)
+    self.nrtype2 = sum(1 for v in self.r_dict.values() if v.get('type') == 2)
+
+    self.pcosvf = np.loadtxt(os.path.join(self.pwd, 'cosvf-params.csv'),
+                              delimiter=',', skiprows=1, usecols=2).tolist()
+
+    inflows = pd.read_csv(os.path.join(self.pwd, 'inflows.csv'), index_col=0, parse_dates=True)
+    self.inflows = inflows.pivot(columns='j', values='flow_taf').rename_axis(None, axis=1)
+    self.wy_start = int(min(self.inflows.index.year)) + 1
+    self.wy_end = int(max(self.inflows.index.year))
+    self.inflow_terminals = inflows.j.unique()
+
+    self.variable_constraints = pd.read_csv(
+      os.path.join(self.pwd, 'variable-constraints.csv'), index_col=0, parse_dates=True)
+
+    self.create_cosvf_links()
+    self.df['link'] = self.df.i.map(str) + '_' + self.df.j.map(str) + '_' + self.df.k.map(str)
+    self.df.set_index('link', inplace=True)
 
 
   def create_cosvf_links(self):
@@ -155,10 +267,224 @@ class COSVF(CALVIN):
         self.df = pd.concat([self.df, l], ignore_index=False)
 
 
+  def _precompute_fitness_links(self):
+    """Precompute link sets for direct fitness computation in the annual COSVF loop.
+
+    Called once at the end of ``__init__`` so that the per-year
+    :meth:`_compute_fitness_direct` call reads ``model.X`` / ``model.u``
+    directly without constructing DataFrames or applying pandas filters.
+
+    Replicates the filter logic in :meth:`compute_network_costs` and
+    :meth:`compute_gw_overdraft` against the static ``self.df`` snapshot.
+    Variable-constraint updates affect ``model.u`` at solve time; only the
+    *membership* of each link in a category is static.
+
+    Populates
+    ---------
+    _shortage_links : list of (i, j, k, cost)
+        Links with cost < 0 and static UB < 1e6 (demand shortage links),
+        excluding COSVF penalty links, SR→SR persuasions, and DBUG links.
+    _op_links : list of (i, j, k, cost)
+        Links with cost > 0 (operational costs), same exclusions.
+    _gw_final_links : list of (i, j, k)
+        GW reservoir → FINAL links with cost < 0 (overdraft measure).
+    """
+    df = self.df
+
+    # Exclusion mask — identical to compute_network_costs()
+    is_sr_gw_final = (
+        (df.i.str.contains('SR') | df.i.str.contains('GW')) &
+        df.j.str.contains('FINAL')
+    )
+    is_sr_sr = df.i.str.contains('SR') & df.j.str.contains('SR')
+    is_dbug  = df.index.str.contains('DBUG')
+    cost_df  = df[~(is_sr_gw_final | is_sr_sr | is_dbug)]
+
+    # Shortage links (cost < 0, static UB < 1e6 to exclude channel persuasions)
+    short_mask = (cost_df.cost < 0) & (cost_df.upper_bound < 1e6)
+    self._shortage_links = [
+        (row.i, row.j, int(row.k), float(row.cost))
+        for _, row in cost_df[short_mask].iterrows()
+    ]
+
+    # Operational cost links (cost > 0)
+    op_mask = cost_df.cost > 0
+    self._op_links = [
+        (row.i, row.j, int(row.k), float(row.cost))
+        for _, row in cost_df[op_mask].iterrows()
+    ]
+
+    # GW final links for overdraft calculation
+    gw_mask = df.i.str.contains('GW_') & (df.j == 'FINAL') & (df.cost < 0)
+    self._gw_final_links = [
+        (row.i, row.j, int(row.k))
+        for _, row in df[gw_mask].iterrows()
+    ]
+
+
+  def _precompute_update_data(self):
+    """Precompute all data for the fast annual model-update path."""
+    self._precompute_inflow_data()
+    self._precompute_vc_data()
+    self._precompute_storage_keys()
+
+  def _precompute_inflow_data(self):
+    """Precompute _inflow_keys and _inflow_matrix for fast per-year inflow updates."""
+    n_years  = self.wy_end - self.wy_start + 1
+    wy_start = self.wy_start
+    terminals  = list(self.inflows.columns)
+    tdates     = pd.date_range('{}-10-31'.format(wy_start - 1),
+                               '{}-09-30'.format(wy_start), freq='ME')
+    tdate_strs = [str(d.date()) for d in tdates]
+
+    # Pyomo key tuples for every (terminal, month) combination
+    self._inflow_keys = [
+        ('INFLOW.{}'.format(fd), '{}.{}'.format(t, fd))
+        for t in terminals
+        for fd in tdate_strs
+    ]
+
+    # Inflow value matrix: (n_years, n_terminals * 12)
+    # Rows of self.inflows are monthly dates, columns are terminals.
+    # reshape → (n_years, 12, n_terminals); transpose → (n_years, n_terminals, 12);
+    # flatten last two dims → matches key order (terminals-outer, months-inner).
+    all_dates = pd.date_range('{}-10-31'.format(wy_start - 1),
+                              '{}-09-30'.format(self.wy_end), freq='ME')
+    arr = self.inflows.loc[all_dates, terminals].values.reshape(n_years, 12, len(terminals))
+    self._inflow_matrix = arr.transpose(0, 2, 1).reshape(n_years, len(terminals) * 12)
+
+  def _precompute_vc_data(self):
+    """Precompute _vc_by_year: VC entries grouped by water year with template keys."""
+    wy_start = self.wy_start
+    vc = self.variable_constraints
+
+    # Vectorised template-key computation on the entire DataFrame at once.
+    # Template rule: month >= 10 → use (wy_start − 1), else → use wy_start.
+
+    # i-key: 'NODE.YYYY-MM-DD' → 'NODE.TYYYY-MM-DD'
+    # pd.DateOffset clamps Feb 29 → Feb 28 in non-leap template years; replicate
+    # that by fixing the MM-DD suffix before string concatenation.
+    i_split  = vc['i'].str.split('.', expand=True)
+    i_node   = i_split[0]
+    i_dpart  = i_split[1]
+    i_month  = i_dpart.str[5:7].astype(int)
+    i_tyear  = np.where(i_month >= 10, wy_start - 1, wy_start)
+    i_mmdd   = i_dpart.str[5:].str.replace('02-29', '02-28', regex=False)
+    i_tkey   = (i_node + '.' +
+                pd.Series(i_tyear.astype(str), index=i_node.index) + '-' + i_mmdd)
+
+    # j-key: some rows have 'FINAL' (no dot); keep those unchanged
+    j_has_dot = vc['j'].str.contains(r'\.', regex=True)
+    j_split   = vc['j'].str.split('.', expand=True)
+    j_node    = j_split[0]
+    j_dpart   = j_split[1].fillna('')
+    j_month   = j_dpart.str[5:7].replace('', '0').astype(int)
+    j_tyear   = np.where(j_month >= 10, wy_start - 1, wy_start)
+    j_mmdd    = j_dpart.str[5:].str.replace('02-29', '02-28', regex=False)
+    j_computed = (j_node + '.' +
+                  pd.Series(j_tyear.astype(str), index=j_node.index) + '-' + j_mmdd)
+    j_tkey    = np.where(j_has_dot, j_computed.values, vc['j'].values)
+
+    idx    = pd.DatetimeIndex(vc.index)
+    wy_arr = np.where(idx.month >= 10, idx.year + 1, idx.year)
+
+    vc_ext = pd.DataFrame({
+        '_ki': i_tkey.values,
+        '_kj': j_tkey,
+        '_k':  vc['k'].values.astype(int),
+        '_lb': vc['lower_bound'].values.astype(float),
+        '_ub': vc['upper_bound'].values.astype(float),
+        '_wy': wy_arr,
+    })
+
+    # Build a frozenset of valid template link keys so that VC rows whose
+    # computed template key does not exist in the model are silently dropped.
+    # The common case is cross-year storage links (e.g. SR_BUC.YYYY-09-30 →
+    # SR_BUC.YYYY-10-31) that map to a backwards template key because the
+    # j-month (10) is assigned to wy_start-1 while i-month (9) is wy_start.
+    # In the COSVF template these carry-over links are replaced by EOP
+    # (→ FINAL) links and therefore do not exist in self.df.
+    _valid_links = frozenset(zip(self.df.i, self.df.j, self.df.k.astype(int)))
+
+    self._vc_by_year = {
+        int(wy): [
+            (ki, kj, k, lb, ub)
+            for ki, kj, k, lb, ub in zip(
+                grp['_ki'], grp['_kj'], grp['_k'], grp['_lb'], grp['_ub']
+            )
+            if (ki, kj, k) in _valid_links
+        ]
+        for wy, grp in vc_ext.groupby('_wy')
+    }
+
+  def _precompute_storage_keys(self):
+    """Precompute _initial_storage_keys and _eop_keys for reservoir IC and EOP updates."""
+    wy_start = self.wy_start
+    self._initial_storage_keys = {
+        r: ('INITIAL', '{}.{}-10-31'.format(r, wy_start - 1), 0)
+        for r in self.r_dict
+    }
+    self._eop_keys = {
+        r: [
+            ('{}.{}-09-30'.format(r, wy_start), 'FINAL', k)
+            for k in range(self.r_dict[r]['k_count'])
+        ]
+        for r in self.r_dict
+    }
+
+
+  def _compute_fitness_direct(self):
+    """Compute fitness values directly from the solved Pyomo model.
+
+    Replaces :meth:`model_to_dataframe` + :meth:`compute_network_costs` +
+    :meth:`compute_gw_overdraft` with a single pass over the precomputed
+    link lists, reading ``model.X[s].value`` (flow) and ``model.u[s].value``
+    (upper bound, which reflects any variable-constraint updates for the
+    current water year) without constructing DataFrames.
+
+    Returns
+    -------
+    short_costs : float
+        Total shortage penalty cost across all shortage links (\\$/yr).
+    op_costs : float
+        Total operational cost across all op links (\\$/yr).
+    gw_overdraft : float
+        Total groundwater overdraft volume (TAF) — sum of (UB − flow) for
+        GW→FINAL links where flow < UB.
+    """
+    model = self.model
+    short_costs = 0.0
+    op_costs    = 0.0
+
+    for (i, j, k, cost) in self._shortage_links:
+      s    = (i, j, k)
+      flow = model.X[s].value if s in model.X else 0.0
+      ub   = model.u[s].value
+      shortage = ub - flow
+      if shortage > 0:
+        short_costs += -cost * shortage   # cost < 0, so -cost > 0
+
+    for (i, j, k, cost) in self._op_links:
+      s    = (i, j, k)
+      flow = model.X[s].value if s in model.X else 0.0
+      op_costs += cost * flow
+
+    gw_overdraft = 0.0
+    for (i, j, k) in self._gw_final_links:
+      s      = (i, j, k)
+      flow   = model.X[s].value if s in model.X else 0.0
+      ub     = model.u[s].value
+      change = flow - ub
+      if change < 0:
+        gw_overdraft += -change
+
+    return short_costs, op_costs, gw_overdraft
+
+
   def create_pyomo_model(self, **kwargs):
     """
-    Create the pyomo model for COSVF mode. 
-    
+    Create the pyomo model for COSVF mode.
+
     The COSVF instance of CALVIN uses CALVIN's ``create_pyomo_model`` but with ``cosvf_mode`` parameter **always** on.
     The only difference is whether debug links will be used or not. When debug_mode is used with COSVF, the
     debug links are assigned the default (or user specified) ```debug_cost`` of 2e7 \\$/af; however, all other cost links
@@ -169,99 +495,248 @@ class COSVF(CALVIN):
     super().create_pyomo_model(cosvf_mode=True, **kwargs)
 
 
-  def cosvf_solve(self, solver='glpk', nproc=1, resultdir=None, pcosvf=None):
+  def _capture_initial_storage(self):
+    """Snapshot initial storage l/u bounds after create_pyomo_model.
+
+    Call once after :meth:`create_pyomo_model` to enable worker-process reuse
+    via :meth:`_reset_initial_storage`.  The snapshot preserves the starting
+    storage levels so that :meth:`cosvf_solve_reuse` can restore them before
+    each new individual evaluation without rebuilding the model.
+    """
+    from pyomo.core import value as _pyoval
+    self._initial_storage_snapshot = {
+        r: (_pyoval(self.model.l[key]), _pyoval(self.model.u[key]))
+        for r, key in self._initial_storage_keys.items()
+    }
+
+
+  def _reset_initial_storage(self):
+    """Restore initial storage to the values captured by _capture_initial_storage.
+
+    Called at the start of :meth:`cosvf_solve_reuse` to reset model state
+    before each evaluation in a worker process that reuses the Pyomo model.
+    """
+    for r, key in self._initial_storage_keys.items():
+      l_val, u_val = self._initial_storage_snapshot[r]
+      self.model.l[key] = l_val
+      self.model.u[key] = u_val
+
+
+  def _prepare_cosvf_solve(self, solver, nproc, pcosvf, resultdir):
+    """Initialize solver, penalties, and postprocess collector for cosvf_solve.
+
+    Returns (opt, _appsi, _basis_dir, _basis_file, _collector, f3).
+    """
+    opt, _appsi = _init_cosvf_solver(solver, nproc, self.log)
+
+    # CBC: warm-start basis file + dual simplex + disable presolve after year 1
+    _basis_dir, _basis_file = None, None
+    if not _appsi and solver == 'cbc':
+      opt.options['dualSimplex'] = ''
+      _basis_dir = tempfile.mkdtemp(prefix='calvin-cosvf-')
+      _basis_file = os.path.join(_basis_dir, 'warm.bas')
+      opt.options['basisOut'] = _basis_file
+    elif not _appsi and solver == 'cplex':
+      opt.options['lpmethod'] = 2
+    elif not _appsi and solver == 'gurobi':
+      opt.options['Method'] = 1
+
+    if pcosvf is not None:
+      self.pcosvf = pcosvf
+    self.assign_cosvf_penalties()
+    # Only write the reference CSV when postprocessing (resultdir is not None);
+    # skip in EA mode to avoid 80 workers racing to write the same file.
+    if resultdir is not None:
+      super().model_to_dataframe().to_csv(
+        os.path.join(self.pwd, 'links-pyomo-model-reference.csv'))
+
+    f3 = np.mean(np.array(self.pcosvf)) * -1
+    _collector = _PostprocessCollector() if resultdir is not None else None
+    return opt, _appsi, _basis_dir, _basis_file, _collector, f3
+
+
+  def cosvf_solve_reuse(self, opt, appsi, pcosvf, solver='highs'):
+    """Evaluate one EA individual using a pre-initialized solver (worker reuse mode).
+
+    Skips model construction and solver initialisation, which dominate runtime
+    when workers rebuild everything per call.  Instead:
+
+    1. Resets initial storage to the snapshot from :meth:`_capture_initial_storage`.
+    2. Assigns new COSVF penalty parameters.
+    3. Runs the full annual sequence using the cached solver.
+
+    Prerequisites
+    -------------
+    Call :meth:`create_pyomo_model` then :meth:`_capture_initial_storage` once
+    before the first call (done in the worker process initialiser).
+
+    Parameters
+    ----------
+    opt : APPSI solver or SolverFactory instance
+        Pre-initialised solver (returned by :func:`_init_cosvf_solver`).
+    appsi : bool
+        ``True`` if *opt* is an APPSI persistent solver.
+    pcosvf : list
+        COSVF penalty parameters for this individual.
+    solver : str, optional
+        Solver name used for CBC basis-file warm-start logic.  Default
+        ``'highs'`` (APPSI mode; no basis file needed).
+
+    Returns
+    -------
+    tuple of (f1, f2, f3) fitness values
+    """
+    self._reset_initial_storage()
+
+    if pcosvf is not None:
+      self.pcosvf = pcosvf
+    self.assign_cosvf_penalties()
+
+    f3 = np.mean(np.array(self.pcosvf)) * -1
+
+    f1, f2, years = 0, 0, 1
+    for wy in range(self.wy_start, self.wy_end + 1):
+      first_year = (wy == self.wy_start)
+      f1_inc, f2, ok = self._solve_one_year(
+        wy, first_year, opt, appsi, solver, None, None)
+      if not ok:
+        self.log.info('Solver issue! Fitness values set to infinite')
+        return (np.inf, np.inf, np.inf)
+      f1 += f1_inc
+      years = wy - self.wy_start + 1
+
+    return f1 / 1e3 / years, f2 / 1e3 / years, f3
+
+
+  def _solve_one_year(self, wy, first_year, opt, _appsi, solver, _basis_file, _collector):
+    """Update model for one water year, solve, and return (f1_increment, f2, is_optimal).
+
+    f2 (GW overdraft) is not accumulated across years — the last year's value
+    reflects cumulative overdraft from initial conditions.
+    """
+    from pyomo.opt import TerminationCondition
+
+    if not first_year:
+      eop = {r: sum(self.model.X[s].value for s in keys)
+             for r, keys in self._eop_keys.items()}
+      self.cosvf_update_initial_storage(eop=eop)
+
+    self.cosvf_update_inflows(wy=wy)
+    if self.variable_constraints is not None:
+      self.cosvf_update_variable_bounds(wy=wy)
+
+    # CBC: from year 2 onward, warm-start from the previous basis and skip presolve
+    if solver == 'cbc' and not first_year and _basis_file and os.path.exists(_basis_file):
+      opt.options['basisIn'] = _basis_file
+      opt.options['presolve'] = 'off'
+
+    self.log.debug('-----Solving Pyomo Model (wy=%d)' % wy)
+    if _appsi:
+      opt.config.load_solution = False
+      self.results = opt.solve(self.model)
+      tc_str = str(self.results.termination_condition).lower()
+      is_optimal = 'optimal' in tc_str and 'infeasible' not in tc_str
+      if is_optimal:
+        self.results.solution_loader.load_vars()
+    else:
+      self.results = opt.solve(self.model, keepfiles=False)
+      is_optimal = (
+        self.results.solver.termination_condition == TerminationCondition.optimal
+      )
+
+    if not is_optimal:
+      return 0.0, 0.0, False
+
+    if not _appsi:
+      self.model.solutions.load_from(self.results)
+    elif _collector is not None:
+      # APPSI does not auto-populate model.dual; load explicitly when postprocessing.
+      for con, val in self.results.solution_loader.get_duals().items():
+        self.model.dual[con] = val
+
+    short_costs, op_costs, f2 = self._compute_fitness_direct()
+    if _collector is not None:
+      _collector.collect(self.df, self.model, wy)
+    return short_costs + op_costs, f2, True
+
+  def cosvf_solve(self, solver='highs', nproc=1, resultdir=None, pcosvf=None, show_progress=False):
     """
     Solve COSVF CALVIN model for full period of analysis
 
-    :param solver: (string) solver name. glpk, cplex, cbc, gurobi.
+    :param solver: (string) solver name. glpk, cplex, cbc, gurobi, highs.
     :param nproc: (int) number of processors assigned to model solver instance
     :param resultdir: (path) directory to write out results. If ``None`` (default), the assumption
       is that the user is running in evolutionary mode
     :param pcosvf: (list) If ``None`` (default) the COSVF parameters loaded when constructing
       the COSVF CALVIN instance (``cosvf-params.csv``) will be used. Otherwise,
-      and specifically for evolutionary mode, the argument is the list of :math:`P_{min}` 
-      and :math:`P_{max}` for quadratic carryover penalty curves on surface water 
-      reservoirs and :math:`P_{GW}` for linear penalty on groundwater reservoirs, where 
-      the order of the penalty parameters for each reservoir must match the 
-      order of reservoirs in the ``r_dict.json``. 
-    :returns : 
+      and specifically for evolutionary mode, the argument is the list of :math:`P_{min}`
+      and :math:`P_{max}` for quadratic carryover penalty curves on surface water
+      reservoirs and :math:`P_{GW}` for linear penalty on groundwater reservoirs, where
+      the order of the penalty parameters for each reservoir must match the
+      order of reservoirs in the ``r_dict.json``.
+    :param show_progress: (bool) display a tqdm progress bar in the console (default False).
+      Requires ``tqdm`` to be installed; silently disabled if it is not.
+    :returns: tuple of (f1, f2, f3) fitness values
+
+    **Performance notes**
+
+    - *Gurobi / CPLEX / HiGHS*: automatically uses Pyomo's APPSI persistent
+      interface, which keeps the LP in the solver's memory between years and
+      pushes only changed bounds as deltas.  Dual simplex is selected so that
+      the previously feasible basis is re-optimised rather than restarted from
+      scratch.
+    - *CBC*: uses the file-based interface with warm-start basis handoff.
+      After the first year the previous optimal basis is fed back (``basisIn``),
+      LP presolve is disabled (``presolve off``), and dual simplex is selected
+      (``dualSimplex``).  Together these typically halve solve time on years 2–82
+      versus cold-starting with primal simplex.
+    - *GLPK*: unchanged (GLPK does not support basis warm-start via Pyomo).
     """
-    # declare solver
-    from pyomo.opt import SolverFactory
-    opt = SolverFactory(solver)
-    if nproc > 1 and solver != 'glpk':
-      opt.options['threads'] = nproc
+    opt, _appsi, _basis_dir, _basis_file, _collector, f3 = \
+      self._prepare_cosvf_solve(solver, nproc, pcosvf, resultdir)
 
-    # overwrite pcosvf (used for evolutionary mode)
-    if pcosvf is not None: self.pcosvf = pcosvf
+    _n_years = self.wy_end - self.wy_start + 1
+    if show_progress:
+      try:
+        from tqdm import tqdm
+        _year_iter = tqdm(range(self.wy_start, self.wy_end + 1),
+                         total=_n_years, unit='yr',
+                         bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} yr '
+                                    '[{elapsed}<{remaining}, {rate_fmt}]{postfix}')
+      except ImportError:
+        self.log.warning('tqdm not installed; progress bar disabled')
+        _year_iter = range(self.wy_start, self.wy_end + 1)
+        show_progress = False
+    else:
+      _year_iter = range(self.wy_start, self.wy_end + 1)
 
-    # assign COSVF penalties to r links 
-    self.assign_cosvf_penalties()
-    
-    # output final model links file (for reference)
-    model_df = super().model_to_dataframe()
-    model_df.to_csv(os.path.join(self.pwd,'links-pyomo-model-reference.csv'))
-
-    # initialize fitness 1 (value is cumulative over period-of-analysis)
-    f1 = 0
-
-    # calculate avg COSVF penalty
-    f3 = np.mean(np.array(self.pcosvf)) * -1
-
-    # loop through years in sequence
-    for wy in range(self.wy_start, self.wy_end + 1):
-      # number of years so far evaluated in the annual sequence
-      years = wy - self.wy_start + 1
-
-      # update storages, inflows, and (variable) constraints for the wy
-      if wy != self.wy_start:
-        eop = {}
-        for r in self.r_dict:
-          eop[r] = 0
-          for k in range(self.r_dict[r]['k_count']):
-            eop[r] += self.model.X[('{}.{}-09-30'.format(r,self.wy_start), 'FINAL', k)].value
-        self.cosvf_update_initial_storage(eop=eop)
-
-      # update inflows for current water year
-      self.cosvf_update_inflows(wy=wy)
-
-      # update constraints which vary across water years
-      if self.variable_constraints is not None: self.cosvf_update_variable_bounds(wy=wy)
-
-      # solve model
-      self.log.debug('-----Solving Pyomo Model (wy=%d)' % wy)
-      self.results = opt.solve(self.model, keepfiles=False)
-      
-      # check solver solution status
-      if self.results.solver.termination_condition == TerminationCondition.optimal:
-        
-        # load solution to model
-        self.model.solutions.load_from(self.results)
-
-        # join flows and costs for fitness calcs
-        model_df = super().model_to_dataframe()
-
-        # calc fitness
-        short_costs, op_costs = self.compute_network_costs(model_df)
-        f1 += (short_costs + op_costs)
-        f2 = self.compute_gw_overdraft(model_df)
-
+    f1, f2, years = 0, 0, 1
+    _completed = False
+    try:
+      for wy in _year_iter:
+        years = wy - self.wy_start + 1
+        first_year = (wy == self.wy_start)
+        f1_inc, f2, ok = self._solve_one_year(
+          wy, first_year, opt, _appsi, solver, _basis_file, _collector)
+        if not ok:
+          self.log.info('Solver issue! Fitness values set to infinite')
+          return (np.inf, np.inf, np.inf)
+        f1 += f1_inc
         self.log.debug('Costs \\$M/yr=%.1f; GW O.D. MAF/yr=%.1f' % (f1/1e3/years, f2/1e3/years))
+        if show_progress:
+          _year_iter.set_postfix(
+            wy=wy,
+            cost='${:.0f}M'.format(f1 / 1e3 / years),
+            gw_od='{:.2f}MAF'.format(f2 / 1e3 / years),
+          )
+      _completed = True
+    finally:
+      if _basis_dir:
+        shutil.rmtree(_basis_dir, ignore_errors=True)
+      if _collector is not None and _completed:
+        _collector.write(resultdir)
 
-        # postprocessing and saving
-        if resultdir is not None: 
-          postprocess(self.df, self.model, resultdir=resultdir, annual=True, year=wy)
-
-      else:
-        # Something else is wrong
-        self.log.info('Solver issue! Fitness values set to infinite')
-        return(np.inf, np.inf, np.inf)
-
-    # normalize fitness values by period of record length
-    f1 = f1 / 1e3 / years
-    f2 = f2 / 1e3 / years
-
-    return f1, f2, f3
+    return f1 / 1e3 / years, f2 / 1e3 / years, f3
 
 
   def compute_network_costs(self, model_df):
@@ -277,9 +752,9 @@ class COSVF(CALVIN):
     cost_links = model_df.drop(model_df[((model_df['i'].str.contains('SR')) |
                                         (model_df['i'].str.contains('GW'))) &
                                         (model_df['j'].str.contains('FINAL'))].index)
-    # drop storage persuasion penalties
+    # drop storage persuasion penalties (SR→SR self-links)
     cost_links = cost_links.drop(cost_links[(cost_links['i'].str.contains('SR')) &
-                                        (cost_links['i'].str.contains('SR'))].index)                                   
+                                        (cost_links['j'].str.contains('SR'))].index)                                   
     cost_links = cost_links.loc[~cost_links.index.str.contains('DBUG')]
 
     # all shortage cost links
@@ -300,7 +775,6 @@ class COSVF(CALVIN):
     
     :param model_df: (Pandas dataframe) dataframe of cost, upper bound, and flows
       from the solved annual Pyomo CALVIN instance
-    :param wy: (int) current water year being evaluated in the annual sequence 
     :returns: (float) total groundwater overdraft of all groundwater reservoirs
     """
     # get groundwater reservoir final links from model
@@ -356,9 +830,11 @@ class COSVF(CALVIN):
     """
     breaks, slopes = np.zeros(len(x)-1), np.zeros(len(x)-1)
     for i in range(0, len(x)-1):
-      dist = (x[i+1]-x[i]) if i>0 else x[i] + (x[i+1]-x[i])
-      slope = (y[i+1]-y[i]) / dist
-      breaks[i], slopes[i] = dist, slope 
+      dx = x[i+1] - x[i]
+      slope = (y[i+1] - y[i]) / dx
+      # k=0 upper bound includes dead pool (0 to x[1]); k>0 is just segment width
+      width = x[i+1] if i == 0 else dx
+      breaks[i], slopes[i] = width, slope
     return breaks, slopes
 
 
@@ -379,7 +855,7 @@ class COSVF(CALVIN):
         pmax=self.pcosvf[self.r_dict[r]['cosvf_param_index'][1]],
         eop_min=self.r_dict[r]['lb'],
         eop_max=self.r_dict[r]['ub'],
-        k_count=15)
+        k_count=self.r_dict[r]['k_count'])
       
       # get piecewise storage breakpoints and penalty slopes
       r_b, r_k = self.cosvf_marginal_piecewise(cosvfx, cosvfy)
@@ -414,60 +890,41 @@ class COSVF(CALVIN):
     """
     Update initial storages in COSVF annual mode
 
-    :param eop: (dict) dictionary of reservoir nodes with the end of year storage 
+    :param eop: (dict) dictionary of reservoir nodes with the end of year storage
       from the previous water year's solution
     :returns: nothing, but modifies CALVIN model object
     """
-    # update initial storage condition
     if eop is not None:
-      for r in eop:
-        self.model.l[('INITIAL', '{}.{}-10-31'.format(r,self.wy_start-1), 0)] = eop[r]
-        self.model.u[('INITIAL', '{}.{}-10-31'.format(r,self.wy_start-1), 0)] = eop[r]
+      for r, key in self._initial_storage_keys.items():
+        v = eop[r]
+        self.model.l[key] = v
+        self.model.u[key] = v
 
 
   def cosvf_update_inflows(self, wy):
     """
     Update link inflows to reflect the current water year under analysis.
-    
+
     :param wy: (int) current water year under evaluation.
     :returns: nothing, but modifies CALVIN model object
-    """ 
-    # replace inflows for current wy in sequence
-    offset = wy - self.wy_start
-    dates = pd.date_range('{}-10-31'.format(wy - 1), '{}-09-30'.format(wy), freq='ME')
-    for t in self.inflow_terminals:
-      for date in dates:
-        inflow = self.inflows.loc[date, t]
-        fdate = str((date - pd.DateOffset(years=offset)).date())
-        self.model.l[('INFLOW.{}'.format(fdate), '{}.{}'.format(t, fdate), 0)] = inflow
-        self.model.u[('INFLOW.{}'.format(fdate), '{}.{}'.format(t, fdate), 0)] = inflow
+    """
+    row = self._inflow_matrix[wy - self.wy_start]
+    for idx, (ki, kj) in enumerate(self._inflow_keys):
+      v = row[idx]
+      self.model.l[(ki, kj, 0)] = v
+      self.model.u[(ki, kj, 0)] = v
 
 
   def cosvf_update_variable_bounds(self, wy):
     """
     Update link lower/upper bounds to reflect the current water year under analysis.
-    
+
     :param wy: (int) current water year under evaluation.
     :returns: nothing, but modifies CALVIN model object
     """
-    offset = wy - self.wy_start 
-    dates = pd.date_range('{}-10-31'.format(wy - 1), '{}-09-30'.format(wy), freq='ME')
-    variable_constraints_wy = self.variable_constraints.loc[dates]
-    for idx, row in variable_constraints_wy.iterrows():
-      i_node, i_date = row.i.split('.')[0], row.i.split('.')[1]
-      i_date = str((pd.to_datetime(i_date, format='%Y-%m-%d') - pd.DateOffset(years=offset)).date())
-      i = i_node+'.'+i_date
-      try:
-        j_node, j_date = row.j.split('.')[0], row.j.split('.')[1]
-        j_date = str((pd.to_datetime(j_date, format='%Y-%m-%d') - pd.DateOffset(years=offset)).date())
-        j = j_node+'.'+j_date
-      except:
-        j = 'FINAL'
-      k = float(row.k)
-      l = row.lower_bound
-      u = row.upper_bound
-      self.model.l[(i,j,k)] = l
-      self.model.u[(i,j,k)] = u
+    for (ki, kj, k, lb, ub) in self._vc_by_year[wy]:
+      self.model.l[(ki, kj, k)] = lb
+      self.model.u[(ki, kj, k)] = ub
 
 
 #####################################################
@@ -488,6 +945,8 @@ def cosvf_ea_main(toolbox, n_gen, mu, pwd, cxpb=1, mutpb=1, seed=None, log_name=
   :param checkpoint: (path) checkpoint file of previous EA to continue running
   :returns: nothing, but outputs evolutionary results to CSV and a pickled checkpoint
   """ 
+  import time
+
   if checkpoint:
     with open(os.path.join(pwd,checkpoint), "rb") as cp_file:
         cp = pickle.load(cp_file)
@@ -522,8 +981,29 @@ def cosvf_ea_main(toolbox, n_gen, mu, pwd, cxpb=1, mutpb=1, seed=None, log_name=
   fit_stats.register("min", np.min, axis=0)
   fit_stats.register("max", np.max, axis=0)
 
+  # Console table header — printed once before the loop
+  _hdr = '{:>5}  {:>6}  {:>14}  {:>14}  {:>14}  {:>8}'
+  _row = '{:>5}  {:>6}  {:>14}  {:>14}  {:>14}  {:>8}'
+  print(_hdr.format('gen', 'evals', 'best(f1,f2,f3)', 'avg(f1,f2,f3)', 'std(f1,f2,f3)', 'gen_time'), flush=True)
+
+  # Optional tqdm progress bar on the generation loop
+  try:
+    from tqdm import tqdm as _tqdm
+    _gen_iter = _tqdm(
+      range(start_gen, n_gen + 1),
+      total=n_gen + 1 - start_gen,
+      unit='gen',
+      bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} gen [{elapsed}<{remaining}]',
+      leave=True,
+    )
+  except ImportError:
+    log.warning('tqdm not installed; no generation progress bar')
+    _gen_iter = range(start_gen, n_gen + 1)
+
   ### Evolutionary loop ###
-  for gen in range(start_gen, n_gen+1):
+  _wall_start = time.time()
+  for gen in _gen_iter:
+    _gen_t0 = time.time()
 
     if gen==start_gen:
       # Evaluate the individuals with an invalid fitness
@@ -549,22 +1029,38 @@ def cosvf_ea_main(toolbox, n_gen, mu, pwd, cxpb=1, mutpb=1, seed=None, log_name=
              **pop_hist.compile(pop), 
              **fitness_hist.compile(pop),
              **fit_stats.compile(pop))
-    log.info('----------------Generation = {}-------------'.format(gen))
-    log.info('min(f)={}'.format(["%.2f" % f for f in logbook.select('min')[-1]]))
-    log.info('max(f)={}'.format(["%.2f" % f for f in logbook.select('max')[-1]]))
-    log.info('avg(f)={}'.format(["%.2f" % f for f in logbook.select('avg')[-1]]))
-    log.info('std(f)={}'.format(["%.2f" % f for f in logbook.select('std')[-1]]))
 
-    # checkpoint ea every 5 generations
-    if gen % 5 == 0:
-      cp = dict(population=pop, generation=gen, logbook=logbook, random_state=random.getstate())
-      with open(os.path.join(pwd,"cosvf-ea-chkpnt-{}.pickle".format(seed)), "wb") as cp_file:
-        pickle.dump(cp, cp_file)
+    _gen_elapsed = time.time() - _gen_t0
+    _mins, _secs = divmod(int(_gen_elapsed), 60)
+    _gen_time_str = '{:d}m{:02d}s'.format(_mins, _secs)
 
-  # checkpoint the final iteration
-  cp = dict(population=pop, generation=gen, logbook=logbook, random_state=random.getstate())
-  with open(os.path.join(pwd,"cosvf-ea-chkpnt-{}.pickle".format(seed)), "wb") as cp_file:
-    pickle.dump(cp, cp_file)
+    _best = logbook.select('min')[-1]
+    _avg  = logbook.select('avg')[-1]
+    _std  = logbook.select('std')[-1]
+    _best_str = '({})'.format(','.join('{:.1f}'.format(f) for f in _best))
+    _avg_str  = '({})'.format(','.join('{:.1f}'.format(f) for f in _avg))
+    _std_str  = '({})'.format(','.join('{:.1f}'.format(f) for f in _std))
+
+    # Single compact summary line per generation (goes to console + log file)
+    _summary = _row.format(gen, len(invalid_ind), _best_str, _avg_str, _std_str, _gen_time_str)
+    log.info(_summary)
+
+    if hasattr(_gen_iter, 'set_postfix'):
+      _gen_iter.set_postfix(
+        best_f1='{:.1f}'.format(_best[0]),
+        best_f2='{:.2f}'.format(_best[1]),
+        evals=len(invalid_ind),
+      )
+
+    # checkpoint every generation
+    cp = dict(population=pop, generation=gen, logbook=logbook, random_state=random.getstate())
+    with open(os.path.join(pwd,"cosvf-ea-chkpnt-{}.pickle".format(seed)), "wb") as cp_file:
+      pickle.dump(cp, cp_file)
+
+  _total_elapsed = time.time() - _wall_start
+  _h, _rem = divmod(int(_total_elapsed), 3600)
+  _m, _s   = divmod(_rem, 60)
+  log.info('EA complete: total wall time {:d}h{:02d}m{:02d}s'.format(_h, _m, _s))
 
   # save out logbook to csv
   logbook_to_csv(logbook, pwd, seed)
@@ -717,3 +1213,4 @@ def logbook_to_csv(logbook, pwd, seed):
 
   df = pos_df.merge(cost_df, on=['gen','ind'])
   df.to_csv(os.path.join(pwd, 'cosvf-ea-history-seed{}.csv'.format(seed)),index=False)
+

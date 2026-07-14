@@ -17,13 +17,13 @@ sys.path.insert(0, os.path.abspath('../../..'))
 # -- Project information -----------------------------------------------------
 
 project = 'CALVIN'
-copyright = '2020, Jon Herman, Mustafa Dogan, Max Fefer, Nick Santos'
-author = 'Jon Herman, Mustafa Dogan, Max Fefer, Nick Santos'
+copyright = '2026, Jon Herman, Mustafa Dogan, Max Fefer, Nick Santos, Wyatt Arnold'
+author = 'Jon Herman, Mustafa Dogan, Max Fefer, Nick Santos, Wyatt Arnold'
 
 # The full version, including alpha/beta/rc tags
-release = '2020.08.14'
+release = '2026.02.14'
 
-master_doc = "index"  # make it use index instead of "contents" by default
+root_doc = "index"
 
 # -- General configuration ---------------------------------------------------
 
@@ -37,10 +37,16 @@ extensions = [
 	'sphinx.ext.autosectionlabel'
 ]
 
-autodoc_default_flags = ['members', 'undoc-members', 'inherited-members', 'show-inheritance']
+autodoc_default_options = {
+	'members': True,
+	'undoc-members': True,
+	'inherited-members': True,
+	'show-inheritance': True,
+}
 autoclass_content = "both"  # concatenates class docstrings and __init__ docstrings
 
 autosectionlabel_prefix_document = True  # labels will be in the form document:heading
+autosectionlabel_maxdepth = 3  # avoid labeling deeply nested headings (e.g. from autodoc)
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']
@@ -56,7 +62,7 @@ exclude_patterns = ['Thumbs.db', '.DS_Store']
 # The theme to use for HTML and HTML Help pages.  See the documentation for
 # a list of builtin themes.
 #
-html_theme = 'default'
+html_theme = 'furo'
 
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,

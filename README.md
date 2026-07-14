@@ -1,103 +1,78 @@
-## CALVIN Network Flow Optimization Model
+# CALVIN
 
-Network flow optimization of California's water supply system. Requires: [NumPy](http://www.numpy.org/)/[SciPy](https://www.scipy.org/)/[Pandas](http://pandas.pydata.org/) (all available in the [Anaconda Distribution]((https://www.continuum.io/downloads)), and [Pyomo](https://software.sandia.gov/downloads/pub/pyomo/PyomoInstallGuide.html).
-
-Recommended command-line method to install Pyomo:
-```bash 
-conda install -c conda-forge pyomo
-```
-Recommended command-line method to install GLPK solver:
-```bash 
-conda install -c conda-forge glpk
-```
-This will install the [GLPK](https://www.gnu.org/software/glpk/) solver. Pyomo can also connect to other solvers, including [CBC](https://projects.coin-or.org/Cbc) and [CPLEX](https://www-01.ibm.com/software/commerce/optimization/cplex-optimizer/), and [Gurobi](http://www.gurobi.com/). Installation of these solvers is not covered here. *UC Davis: these are installed on HPC1 in `/group/hermangrp/`*.
-
-Recommended command-line method to install Gurobi solver:
-```bash 
-conda install -c gurobi gurobi
-```
-
-Gurobi is a commercial solver but free for academic users. License activation is required for gurobi. Please see [here](https://www.gurobi.com/academia/academic-program-and-licenses/)
+Network flow optimization of California's water supply system.
 
 ## Quick Start
 
-- Clone repository
+Clone the repo and install into your environment. The install step is required so that `calvin` is importable from any working directory (including `scripts/`).
+
+**pip:**
+```bash
+git clone https://github.com/wyattarnold/calvin.git
+cd calvin
+pip install -e ".[solver]"
 ```
-git clone https://github.com/ucd-cws/calvin
+
+**conda:**
+```bash
+git clone https://github.com/wyattarnold/calvin.git
+cd calvin
+conda create -n calvin python=3.11
+conda activate calvin
+pip install -e ".[solver]"
 ```
 
-- Get network data (links). CSV file with column headers:
-```
-i,j,k,cost,amplitude,lower_bound,upper_bound
-```
-Where `i,j,k` are the source node, destination node, and piecewise index for the network problem. Each row is a link. The California network data files are too large to host on Github; they can be downloaded here:
-  + [1-year example (WY 1922, 1 CSV file, 400 KB)](https://www.dropbox.com/s/9aq7aaom4dvn0b5/linksWY1922.csv.zip?dl=1)
-  + [82-year perfect foresight (1 CSV file, 27 MB)](https://www.dropbox.com/s/ikt5j6kd7n80rir/links82yr.csv.zip?dl=1)
-  + [Annual, limited foresight (ZIP of 82 CSV files, 31 MB)](https://www.dropbox.com/s/ac1gxs8y49oiw7d/annual.zip?dl=1)
+> conda users: `pip` works inside conda environments and will install all dependencies. The `-e` flag installs the package in editable mode so that source changes take effect immediately.
 
-  To export other subsets of the network (in space or time), see the [advanced readme](calvin/data) for data export from [HOBBES](https://hobbes.ucdavis.edu/node).
+Download an archived network (pre-built CSV):
+- [1-year example (WY 1922, 400 KB)](https://www.dropbox.com/s/9aq7aaom4dvn0b5/linksWY1922.csv.zip?dl=1)
+- [82-year perfect foresight (27 MB)](https://www.dropbox.com/s/ikt5j6kd7n80rir/links82yr.csv.zip?dl=1)
+- [Annual, limited foresight — 82 CSV files (31 MB)](https://www.dropbox.com/s/ac1gxs8y49oiw7d/annual.zip?dl=1)
 
-- Create a Python script to import the network data and run the optimization. It is recommended to first run in "debug mode" to identify and remove infeasibilities in the network.
-  ```python
-  # main-example.py
-  from calvin import *
-
-  calvin = CALVIN('linksWY1922.csv')
-
-  # run in debug mode. reduces LB constraints.
-  calvin.create_pyomo_model(debug_mode=True, debug_cost=2e10)
-  calvin.solve_pyomo_model(solver='glpk', nproc=1, debug_mode=True)
-
-  # run without debug mode (should be feasible)
-  calvin.create_pyomo_model(debug_mode=False)
-  calvin.solve_pyomo_model(solver='glpk', nproc=1, debug_mode=False)
-
-  postprocess(calvin.df, calvin.model, resultdir='example-results')
-  # creates output CSV files in the directory specified
-  ```
-
-  Running `python main-example.py` on the command line will show:
-  ```bash
-  Creating Pyomo Model (debug=True)
-  -----Solving Pyomo Model (debug=True)
-  Finished. Fixing debug flows...
-  SR_ML.1922-09-30_FINAL UB raised by 8.28 (0.28%)
-  -----Solving Pyomo Model (debug=True)
-  Finished. Fixing debug flows...
-  All debug flows eliminated (iter=2, vol=8.28)
-  Creating Pyomo Model (debug=False)
-  -----Solving Pyomo Model (debug=False)
-  Optimal Solution Found (debug=False).
-  ```
-
-- The folder `example-results` will contain 8 CSV files. All are timeseries data, each row is 1 month. Recommended to read these into `pandas` for further analysis: `df = pd.read_csv(filename, index_col=0, parse_dates=True)`. 
-  + `flow.csv` (flows on links, TAF/month, columns are link names)
-  + `storage.csv` (end-of-month surface and GW storage, TAF)
-  + `dual_lower.csv` (dual values on lower bound constraints)
-  + `dual_upper.csv` (dual values on upper bound constraints)
-  + `dual_node.csv` (dual values on mass balance constraints)
-  + `shortage_volume.csv` (water supply shortage, relative to demand, on selected links and aggregated regions)
-  + `shortage_cost.csv` (cost of water supply shortage, for selected links and aggregated regions)
-  + `evaporation.csv` (TAF/month)
-
-
-## Running in parallel
-
-Several of the solvers available through Pyomo support shared-memory parallelization. (Importantly GLPK is one exception that does not support parallelization). To take advantage of this, change the script above to include:
+Then run:
 ```python
-calvin.solve_pyomo_model(solver='gurobi', nproc=32, debug_mode=True)
-# do the same again for the non-debug mode run
+from calvin import CALVIN, postprocess
+
+calvin = CALVIN('linksWY1922.csv')
+calvin.create_pyomo_model()
+calvin.solve_pyomo_model(solver='highs')
+postprocess(calvin.df, calvin.model, resultdir='results')
 ```
 
-Several job scripts are included to support running on a SLURM cluster such as [HPC1](http://ssg.cs.ucdavis.edu/services/research/hpc1-cluster) at UC Davis. These will need to be customized for each system. 
+Results are written to `results/` as CSV files (flows, storage, shortages, duals, evaporation).
 
+For full model runs, see the ready-to-use scripts in `scripts/` (one per model type).
 
-## Example Data Visualization: Supply Portfoilio
+## Data
 
-In general, plotting results is left to the user. A few useful plot types will be included in `calvin/plots.py`. One example is the supply portfolio stacked bar chart, which plots the sum of flows by each region, supply type, and urban/agricultural link type:
+The full California network is in [calvin-network-data](https://github.com/ucd-cws/calvin-network-data). Clone it alongside this repo to build custom links files for any time period or spatial subset:
 
-![PyVIN Supply Portfolio Figure](documentation/supply_portfolio.png)
+```bash
+# Clone alongside this repo (both sit in the same parent directory)
+git clone https://github.com/ucd-cws/calvin-network-data
 
-## More Info
-The [Documentation](documentation/pyvin_documentation.pdf) describes the model in more detail. This refers to an earlier version of the model using Pyomo's `AbstractModel` type, but the setup is mostly the same in the current `ConcreteModel`. There is also detailed [Pyomo documentation](http://www.pyomo.org/documentation/).
-  
+# From within calvin/, build the full 82-year monthly network
+python -m calvin.network.cli matrix \
+    --data ../calvin-network-data/data \
+    --start 1921-10 --stop 2003-09 \
+    --output links.csv
+```
+
+## App
+
+Explore the California water network and optimization results at [calvin-view.onrender.com](https://calvin-view.onrender.com).
+
+To run locally, `calvin-network-data` is required. Model runs stored in `./my-models/` are loaded automatically as selectable studies; if none exist the app serves the network map only:
+```bash
+pip install "calvin[app]"
+python -m calvin.app serve --data ../calvin-network-data/data --local
+```
+
+## Docs
+
+Build the Sphinx docs locally:
+```bash
+pip install sphinx furo
+cd documentation/code && make html
+```
+Output lands in `documentation/code/build/html/index.html`.

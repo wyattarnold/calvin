@@ -1,0 +1,13 @@
+# Default configuration for calvin-cosvf-ea.py
+# This file is copied to my-models/calvin-cosvf-ea/config.toml on first run.
+# Edit the model-dir copy to customise a specific experiment.
+
+[run]
+solver      = "highs"
+nproc       = 1       # solver threads per individual evaluation
+max_workers = 6       # parallel workers for local (non-MPI) runs
+
+[ea]
+n_gen      = 120      # evolutionary generations
+mu         = 95       # population size (must be compatible with NSGA-III reference points)
+checkpoint = ""       # filename of .pickle checkpoint to resume from, or "" for cold start

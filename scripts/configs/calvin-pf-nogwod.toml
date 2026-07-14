@@ -1,0 +1,16 @@
+# Default configuration for calvin-pf-nogwod.py
+# This file is copied to my-models/calvin-pf-nogwod/config.toml on first run.
+# Edit the model-dir copy to customise a specific experiment.
+
+[run]
+solver    = "cbc"
+nproc     = 1
+data_path = "../calvin-network-data/data"
+
+[network]
+# "gw"  — GW ending storage lb = initial storage (no net overdraft; recovery allowed)
+# "none" — GW unconstrained (standard PF)
+# "all"  — all storage nodes fixed to ending/initial (COSVF mode)
+constrain_ending = "gw"
+# Per-node lower bound overrides (TAF).
+[network.node_lb_overrides]

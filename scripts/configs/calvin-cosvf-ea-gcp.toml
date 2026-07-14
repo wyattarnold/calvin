@@ -1,0 +1,23 @@
+# GCP configuration for calvin-cosvf-ea.py
+# Tuned for n2-highcpu-96 (96 vCPUs @ 2.8 GHz, STANDARD provisioning).
+# Best available given project quota: C2_CPUS=8, C3_CPUS=24, N2_CPUS=200.
+# To use c2-standard-60 (faster per-core), request C2_CPUS quota >= 64 at:
+#   https://console.cloud.google.com/iam-admin/quotas
+#
+# Synced to my-models/calvin-cosvf-ea/config.toml on the VM by
+# scripts/gcp/03_sync_and_run.sh, which also patches [ea].checkpoint
+# when resuming from a saved generation.
+#
+# To switch machine type, adjust max_workers/mu to match core count.
+# n2-highcpu-96: max_workers=95, mu=96 (2.8 GHz) <-- current
+# c2-standard-60: max_workers=59, mu=60 (3.8 GHz) -- needs quota increase
+
+[run]
+solver      = "highs"
+nproc       = 1       # single solver thread per worker; parallelism via workers
+max_workers = 95      # leave 1 core for OS/main process
+
+[ea]
+n_gen      = 120      # evolutionary generations
+mu         = 96       # population size; all individuals eval in parallel each gen
+checkpoint = ""       # patched by 03_sync_and_run.sh when CHECKPOINT is set

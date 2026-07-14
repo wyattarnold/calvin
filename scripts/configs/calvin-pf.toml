@@ -1,0 +1,12 @@
+# Default configuration for calvin-pf.py
+# This file is copied to my-models/calvin-pf/config.toml on first run.
+# Edit the model-dir copy to customise a specific experiment.
+
+[run]
+solver    = "cbc"
+nproc     = 1
+data_path = "../calvin-network-data/data"
+
+[network]
+# Per-node lower bound overrides (TAF).
+[network.node_lb_overrides]

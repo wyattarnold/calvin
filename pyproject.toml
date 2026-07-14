@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "calvin"
+version = "2026.02.10"
+requires-python = ">=3.12"
+dependencies = [
+    "pandas",
+    "numpy",
+    "openpyxl",
+]
+
+[project.optional-dependencies]
+app = [
+    "fastapi",
+    "uvicorn[standard]",
+]
+solver = [
+    "pyomo",
+    "highspy",
+    "tqdm",
+    "sympy",
+]
+ea = [
+    "pyomo",
+    "highspy",
+    "tqdm",
+    "sympy",
+    "deap",
+    "mpi4py",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["calvin*"]

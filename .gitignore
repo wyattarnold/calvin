@@ -1,14 +1,20 @@
 .idea/*
-documentation/code/build
-
+*.log
 *.pyc
+*.egg*
 __pycache__/
 .DS_Store
-results*
+results/
 calvin/data/links*.csv
 calvin/data/annual/*
 my-models*
-.vscode
-*.code-workspace
-main-pf.py
-.github/
+/tmp/
+documentation/references/
+documentation/code/*
+*sublime*
+
+# Calvin Network App
+calvin/app/static/
+calvin/app/frontend/node_modules/
+calvin/app/frontend/dist/
+calvin/app/data.zip
