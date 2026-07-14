@@ -48,19 +48,36 @@ class CALVIN():
     :param linksfile: (string) CSV file containing network link information
     :param ic: (dict) Initial storage conditions for surface reservoirs
                 only used for annual optimization
-    :param log_name: (string) Logger name; used as the log filename stem.
-                Defaults to "calvin" → writes calvin.log in logdir (or cwd).
-    :param logdir: (string) Directory to write the log file. Defaults to the
-                directory containing linksfile.
+    :param nod: no groundwater overdraft for groundwater reservoirs. Ending storage >= Initial storage
+    :param log_name: A name for a logger - will be used to keep logs from different model runs separate in files.
+                Defaults to "calvin", which results in a log file in the current working directory named "calvin.log".
+                You can change this each time you instantiate the CALVIN class if you want to output separate logs
+                for different runs. Otherwise, all results will be appended to the log file (not overwritten). If you
+                run multiple copies of CALVIN simultaneously, make sure to change this, or you could get errors writing
+                to the log file.
+
+                Do not provide a full path to a log file here because this value is also used in a way that is *not* a
+                file path. If being able to specify a full path is important for your workflow, please raise a GitHub
+                issue. It could be supported, but there is no need at this moment.
     :returns: CALVIN model object
     """
+    print("############################ \n########## CALVIN ########## \n############################")
 
-    # Default logdir to the directory containing the linksfile
-    if logdir is None:
-      logdir = os.path.dirname(os.path.abspath(linksfile))
-    if not os.path.isdir(logdir):
-      os.makedirs(logdir)
-    self.log = setup_logger(log_name, savedir=logdir)
+    # set up logging code
+    self.log = logging.getLogger(log_name)
+    if not self.log.hasHandlers():  # hasHandlers will only be True if someone already called CALVIN with the same log_name in the same session
+      self.log.setLevel("DEBUG")
+      screen_handler = logging.StreamHandler(sys.stdout)
+      screen_handler.setLevel(logging.INFO)
+      screen_formatter = logging.Formatter('%(levelname)s - %(message)s')
+      screen_handler.setFormatter(screen_formatter)
+      self.log.addHandler(screen_handler)
+
+      file_handler = logging.FileHandler("{}.log".format('calvin_log')) # change format to log_name if you want separate files
+      file_handler.setLevel(logging.DEBUG)
+      file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+      file_handler.setFormatter(file_formatter)
+      self.log.addHandler(file_handler)
 
     df = pd.read_csv(linksfile)
     df['link'] = df.i.map(str) + '_' + df.j.map(str) + '_' + df.k.map(str)
@@ -79,13 +96,9 @@ class CALVIN():
     # a few network fixes to make things work
     self.add_ag_region_sinks()
 
-    self.nodes = pd.unique(self.df[['i','j']].values.ravel()).tolist()
-    self.links = list(zip(self.df.i, self.df.j, self.df.k))
-    self.networkcheck() # make sure things aren't broken
-
-    # Snapshot bounds after all initialization; used by get_bound_adjustments()
-    self._initial_bounds = self.df[['lower_bound', 'upper_bound']].copy()
-    
+    self.nodes = pd.unique(df[['i','j']].values.ravel()).tolist()
+    self.links = list(zip(df.i,df.j,df.k))
+    self.networkcheck() # make sure things aren't broken    
 
   def apply_ic(self, ic):
     """
@@ -128,9 +141,16 @@ class CALVIN():
     """
     Impose constraints to prevent groundwater overdraft
 
-    (not currently implemented)
+    :returns: nothing, but modifies the model object
     """
-    pass
+    ix_i = (self.df.i.str.contains('INITIAL') & self.df.j.str.contains('GW')) # initial groundwater storage
+    ix_f = (self.df.i.str.contains('GW') & self.df.j.str.contains('FINAL')) # final groundwater storage
+    
+    initial = self.df.loc[ix_i, ['lower_bound','upper_bound']].values
+    final = self.df.loc[ix_f, ['lower_bound','upper_bound']].values
+    mask = final < initial # element-wise comparison, masking because for some gw basins final > initial (negative overdraft)
+    final[mask] = initial[mask] # update only where condition holds, set final storage as initial storage (no overdraft)
+    self.df.loc[ix_f, ['lower_bound','upper_bound']] = final
 
   def networkcheck(self):
     """
@@ -191,7 +211,7 @@ class CALVIN():
       links.upper_bound = maxub
       links['link'] = links.i.map(str) + '_' + links.j.map(str) + '_' + links.k.map(str)
       links.set_index('link', inplace=True)
-      self.df = pd.concat([self.df, links.drop_duplicates()])
+      self.df = pd.concat([df,links.drop_duplicates()])
 
 
   def get_bound_adjustments(self):
@@ -220,14 +240,14 @@ class CALVIN():
     :returns: dataframe of links, excluding debug links.
     """
     df = self.df
-    ix = df.index[df.index.str.contains('DBUG')]
-    df.drop(ix, inplace=True, axis=0)
-    self.nodes = pd.unique(df[['i','j']].values.ravel()).tolist()
-    self.links = list(zip(df.i,df.j,df.k))
+    # ix = df.index[df.index.str.contains('DBUG')] - Do nothing for now - MSD 9/13/2024
+    # df.drop(ix, inplace=True, axis=0)
+    # self.nodes = pd.unique(df[['i','j']].values.ravel()).tolist()
+    # self.links = list(zip(df.i,df.j,df.k))
     return df
 
 
-  def create_pyomo_model(self, debug_mode=False, debug_cost=2e7, cosvf_mode=False):
+  def create_pyomo_model(self, debug_mode=False, debug_cost=2e10, save_final_csv=False):
     """
     Use link data to create Pyomo model (constraints and objective function)
     But do not solve yet.
@@ -236,17 +256,19 @@ class CALVIN():
       Use when there may be infeasibilities in the network.
     :param debug_cost: When in debug mode, assign this cost ($/AF) to flow on debug links.
       This should be an arbitrarily high number.
-    :param cosvf_mode: (boolean) When in COSVF mode, use debug links but preserve all network link costs.
+    :param save_final_csv: (boolean) Whether to save final network as csv after all modifications.
     :returns: nothing, but creates the model object (self.model)
     """
 
     # work on a local copy of the dataframe
     if not debug_mode and self.df.index.str.contains('DBUG').any():
       # previously ran in debug mode, but now done
-      df = self.remove_debug_links()
-      df.to_csv(self.linksfile + '-final.csv')
+      df = self.remove_debug_links() 
     else:
       df = self.df
+    
+    if save_final_csv:
+        df.to_csv(self.linksfile + '-final.csv')
 
     if not cosvf_mode: self.log.info('Creating Pyomo Model (debug=%s)' % debug_mode)
 
@@ -259,30 +281,19 @@ class CALVIN():
     model.source = Param(initialize='SOURCE', within=Any)
     model.sink = Param(initialize='SINK', within=Any)
 
-    # Pre-build parameter dicts for fast O(1) lookup (avoids repeated string concat + df.loc)
-    link_set = set(self.links)
-    ub_dict = {}
-    lb_dict = {}
-    amp_dict = {}
-    cost_dict = {}
-    for row in df.itertuples():
-      key = (row.i, row.j, row.k)
-      if key not in link_set:
-        continue
-      ub_dict[key] = row.upper_bound
-      lb_dict[key] = row.lower_bound
-      amp_dict[key] = row.amplitude
-      if debug_mode and ('DBUG' in str(row.i) + '_' + str(row.j)):
-        cost_dict[key] = debug_cost
-      elif debug_mode and not cosvf_mode:
-        cost_dict[key] = 1.0
-      else:
-        cost_dict[key] = row.cost
+    def init_params(p):
+        if p == 'cost' and debug_mode:
+            return (lambda model,i,j,k: debug_cost 
+                  if ('DBUG' in str(i)+'_'+str(j))
+                  else 1.0)
+        else:
+            self.param_cache = df.to_dict(orient="index")
+            return lambda model,i,j,k: self.param_cache[f"{i}_{j}_{k}"][p]
 
-    model.u = Param(model.A, initialize=ub_dict, mutable=True)
-    model.l = Param(model.A, initialize=lb_dict, mutable=True)
-    model.a = Param(model.A, initialize=amp_dict)
-    model.c = Param(model.A, initialize=cost_dict, mutable=True)
+    model.u = Param(model.A, initialize=init_params('upper_bound'), mutable=True, within=Reals)
+    model.l = Param(model.A, initialize=init_params('lower_bound'), mutable=True, within=Reals)
+    model.a = Param(model.A, initialize=init_params('amplitude'), within=Reals)
+    model.c = Param(model.A, initialize=init_params('cost'), within=Reals)
 
     # The flow over each arc
     model.X = Var(model.A, within=Reals)
@@ -302,20 +313,24 @@ class CALVIN():
       return model.X[i,j,k] >= model.l[i,j,k]
     model.limit_lower = Constraint(model.A, rule=limit_rule_lower)
 
-    # Build arc_in/arc_out dicts in pure Python (no Pyomo overhead)
+    # To speed up creating the mass balance constraints, first
+    # create dictionaries of arcs_in and arcs_out of every node
     arcs_in = {}
     arcs_out = {}
-    for i, j, k in self.links:
-      arcs_in.setdefault(j, []).append((i, j, k))
-      arcs_out.setdefault(i, []).append((i, j, k))
-
-    # Enforce flow through each node (mass balance)
+    
+    for (i,j,k) in self.links:
+        arcs_out.setdefault(i, []).append((i,j,k))
+        arcs_in.setdefault(j, []).append((i,j,k))
+   
     def flow_rule(model, node):
-      if node in ('SOURCE', 'SINK'):
-          return Constraint.Skip
-      outflow  = sum(model.X[i,j,k]/model.a[i,j,k] for i,j,k in arcs_out[node])
-      inflow = sum(model.X[i,j,k] for i,j,k in arcs_in[node])
-      return inflow == outflow
+        if node in [value(model.source), value(model.sink)]:
+            return Constraint.Skip
+        return (
+        sum(model.X[i,j,k] for i,j,k in arcs_in.get(node, [])) # inflow
+        ==
+        sum(model.X[i,j,k]/model.a[i,j,k] for i,j,k in arcs_out.get(node, [])) # outflow
+    )
+    
     model.flow = Constraint(model.N, rule=flow_rule)
 
     model.dual = Suffix(direction=Suffix.IMPORT)
@@ -323,7 +338,7 @@ class CALVIN():
     self.model = model
 
 
-  def solve_pyomo_model(self, solver='highs', nproc=1, debug_mode=False, maxiter=10):
+  def solve_pyomo_model(self, solver='glpk', nproc=1, debug_mode=False, maxiter=10, tee=False, save_json=False):
     """
     Solve Pyomo model (must be called after create_pyomo_model)
     
@@ -334,6 +349,8 @@ class CALVIN():
     :param maxiter: (int) maximum iterations for debug mode.
     :returns: nothing, but assigns results to self.model.solutions.
     :raises: RuntimeError, if problem is found to be infeasible.
+    :param tee: (boolean) Whether to show solver progress in the console
+    :param save_json: (boolean) Whether to save raw solver outputs as a json
     """
 
     from pyomo.opt import SolverFactory
@@ -379,12 +396,15 @@ class CALVIN():
 
     else:
       self.log.info('-----Solving Pyomo Model (debug=%s)' % debug_mode)
-      self.results = opt.solve(self.model, tee=True, load_solutions=False)
+      self.results = opt.solve(self.model, tee=tee)
 
       if self.results.solver.termination_condition == TerminationCondition.optimal:
         self.log.info('Optimal Solution Found (debug=%s).' % debug_mode)
-        self.model.solutions.load_from(self.results)
-        return True
+        # save raw results to stdout
+        if save_json:
+            self.model.solutions.store_to(self.results)
+            self.results.write(filename='results.json', format='json')
+        # self.model.solutions.load_from(self.results)
       else:
         self.log.error('Solver status: %s' % self.results.solver.status)
         self.log.error('Termination condition: %s' % self.results.solver.termination_condition)
