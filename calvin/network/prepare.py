@@ -470,23 +470,13 @@ def _build_links(
     links.loc[~is_dbug, 'j_node'] = links.loc[~is_dbug, 'j'].str.split('.').str[0]
     links.loc[~is_dbug, 'edge'] = links.loc[~is_dbug, 'i_node'] + '_' + links.loc[~is_dbug, 'j_node']
 
-    # Collapse multi-k surface reservoir storage links to single k=0 with full capacity
+    # Surface reservoir storage links keep their piecewise value curves and
+    # segment bounds from the network data (the fixed lower segments encode
+    # the monthly storage floor); the persuasion cost only breaks degeneracy
+    # on segments that carry no value of their own.
     for r in r_type1:
-        edge = f'{r}_{r}'
-        mask = links.edge == edge
-        if not mask.any():
-            continue
-        storage_links = links[mask].copy()
-        k0_mask = mask & (links.k == 0)
-
-        total_ub = storage_links.groupby(['i', 'j'])['upper_bound'].sum()
-        links.loc[k0_mask, 'cost'] = storage_persuasion_cost
-        for idx in links[k0_mask].index:
-            key = (links.at[idx, 'i'], links.at[idx, 'j'])
-            if key in total_ub.index:
-                links.at[idx, 'upper_bound'] = total_ub[key]
-
-        links = links[~(mask & (links.k > 0))]
+        mask = (links.edge == f'{r}_{r}') & (links.cost == 0)
+        links.loc[mask, 'cost'] = storage_persuasion_cost
 
     # Initial storage → r_dict values
     for idx in links[links.i_node == 'INITIAL'].index:
@@ -596,23 +586,12 @@ def _build_links_annual(
     links.loc[~is_dbug, 'edge'] = (links.loc[~is_dbug, 'i_node'] + '_'
                                    + links.loc[~is_dbug, 'j_node'])
 
-    # Collapse multi-k surface reservoir storage links to single k=0 with full capacity
+    # Surface reservoir storage links keep their piecewise value curves and
+    # segment bounds (see prepare_cosvf_links); persuasion only nudges
+    # zero-cost segments.
     for r in r_type1:
-        edge = f'{r}_{r}'
-        mask = links.edge == edge
-        if not mask.any():
-            continue
-        storage_links = links[mask].copy()
-        k0_mask = mask & (links.k == 0)
-
-        total_ub = storage_links.groupby(['i', 'j'])['upper_bound'].sum()
-        links.loc[k0_mask, 'cost'] = storage_persuasion_cost
-        for idx in links[k0_mask].index:
-            key = (links.at[idx, 'i'], links.at[idx, 'j'])
-            if key in total_ub.index:
-                links.at[idx, 'upper_bound'] = total_ub[key]
-
-        links = links[~(mask & (links.k > 0))]
+        mask = (links.edge == f'{r}_{r}') & (links.cost == 0)
+        links.loc[mask, 'cost'] = storage_persuasion_cost
 
     # Initial storage → r_dict values
     for idx in links[links.i_node == 'INITIAL'].index:

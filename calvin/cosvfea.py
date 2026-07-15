@@ -286,8 +286,9 @@ class COSVF(CALVIN):
         excluding COSVF penalty links, SR→SR persuasions, and DBUG links.
     _op_links : list of (i, j, k, cost)
         Links with cost > 0 (operational costs), same exclusions.
-    _gw_final_links : list of (i, j, k)
-        GW reservoir → FINAL links with cost < 0 (overdraft measure).
+    _gw_final_groups : list of ((i, j, 0), [(i, j, k), ...])
+        Per penalized (type-2) GW reservoir: its k=0 FINAL link (ub =
+        eop_init) and all its FINAL segment keys (overdraft measure).
     """
     df = self.df
 
@@ -314,12 +315,22 @@ class COSVF(CALVIN):
         for _, row in cost_df[op_mask].iterrows()
     ]
 
-    # GW final links for overdraft calculation
-    gw_mask = df.i.str.contains('GW_') & (df.j == 'FINAL') & (df.cost < 0)
-    self._gw_final_links = [
-        (row.i, row.j, int(row.k))
-        for _, row in df[gw_mask].iterrows()
-    ]
+    # GW final links for overdraft calculation: group ALL k segments per
+    # penalized (type-2) reservoir. Selecting by cost < 0 breaks when the
+    # penalty p is 0 (segments are cost-indifferent and the solver may
+    # park final storage on k=1, leaving k=0 empty); measuring the total
+    # across segments against the k=0 ub (eop_init) is fill-order-proof
+    # and identical to the old metric for any p < 0.
+    gw_rows = df[df.i.str.contains('GW_') & (df.j == 'FINAL')]
+    self._gw_final_groups = []
+    for res, grp in gw_rows.groupby('i'):
+      meta = self.r_dict.get(res.split('.')[0])
+      if not meta or meta.get('type') != 2:
+        continue
+      keys = [(row.i, row.j, int(row.k)) for _, row in grp.iterrows()]
+      k0 = next((k for k in keys if k[2] == 0), None)
+      if k0 is not None:
+        self._gw_final_groups.append((k0, keys))
 
 
   def _precompute_update_data(self):
@@ -406,13 +417,44 @@ class COSVF(CALVIN):
     # (→ FINAL) links and therefore do not exist in self.df.
     _valid_links = frozenset(zip(self.df.i, self.df.j, self.df.k.astype(int)))
 
+    # VC storage rows carry the NODE-TOTAL lb/ub on k=0 (the extraction
+    # predates piecewise storage links). Applying a total to k=0 alone
+    # while k>0 segments keep their static ubs double-counts capacity, so
+    # distribute totals across segments the way matrix.py does per year:
+    # static ubs fill in k order with the top segment absorbing the year's
+    # ub variation; the year's floor fills lb bottom-up capped by each
+    # segment's resolved ub.
+    _self_link = (self.df.i.str.split('.').str[0]
+                  == self.df.j.str.split('.').str[0])
+    _seg_ubs = {
+        key: list(zip(grp.k.astype(int), grp.upper_bound.astype(float)))
+        for key, grp in
+        self.df[_self_link].sort_values('k').groupby(['i', 'j'])
+        if len(grp) > 1
+    }
+
+    def _expand(ki, kj, k, lb, ub):
+      segs = _seg_ubs.get((ki, kj))
+      if segs is None or k != 0:
+        return [(ki, kj, k, lb, ub)]
+      out, rem_ub, rem_lb = [], ub, lb
+      for n, (kk, static_ub) in enumerate(segs):
+        seg_ub = (max(rem_ub, 0.0) if n == len(segs) - 1
+                  else min(static_ub, rem_ub))
+        seg_lb = min(rem_lb, seg_ub)
+        out.append((ki, kj, kk, seg_lb, seg_ub))
+        rem_ub -= seg_ub
+        rem_lb -= seg_lb
+      return out
+
     self._vc_by_year = {
         int(wy): [
-            (ki, kj, k, lb, ub)
+            entry
             for ki, kj, k, lb, ub in zip(
                 grp['_ki'], grp['_kj'], grp['_k'], grp['_lb'], grp['_ub']
             )
             if (ki, kj, k) in _valid_links
+            for entry in _expand(ki, kj, k, lb, ub)
         ]
         for wy, grp in vc_ext.groupby('_wy')
     }
@@ -470,13 +512,11 @@ class COSVF(CALVIN):
       op_costs += cost * flow
 
     gw_overdraft = 0.0
-    for (i, j, k) in self._gw_final_links:
-      s      = (i, j, k)
-      flow   = model.X[s].value if s in model.X else 0.0
-      ub     = model.u[s].value
-      change = flow - ub
-      if change < 0:
-        gw_overdraft += -change
+    for k0, keys in self._gw_final_groups:
+      total = sum(model.X[s].value if s in model.X else 0.0 for s in keys)
+      ub0 = model.u[k0].value
+      if total < ub0:
+        gw_overdraft += ub0 - total
 
     return short_costs, op_costs, gw_overdraft
 
@@ -636,6 +676,16 @@ class COSVF(CALVIN):
       self.results = opt.solve(self.model)
       tc_str = str(self.results.termination_condition).lower()
       is_optimal = 'optimal' in tc_str and 'infeasible' not in tc_str
+      if not is_optimal:
+        # The persistent warm path occasionally returns non-optimal on the
+        # extreme debug-cost range (HiGHS numerics); a fresh solve of the
+        # unchanged LP from the failed state recovers optimal. Retry once
+        # before declaring the year failed.
+        self.log.warning('wy=%d terminated %s on warm solve; retrying'
+                         % (wy, tc_str))
+        self.results = opt.solve(self.model)
+        tc_str = str(self.results.termination_condition).lower()
+        is_optimal = 'optimal' in tc_str and 'infeasible' not in tc_str
       if is_optimal:
         self.results.solution_loader.load_vars()
     else:
@@ -777,18 +827,22 @@ class COSVF(CALVIN):
       from the solved annual Pyomo CALVIN instance
     :returns: (float) total groundwater overdraft of all groundwater reservoirs
     """
-    # get groundwater reservoir final links from model
-    gw = model_df.loc[(model_df.index.str.contains('GW_')) & 
-                            (model_df.index.str.contains('FINAL') &
-                            (model_df.cost<0))]
+    # per penalized (type-2) reservoir: total FINAL flow across all k
+    # segments vs the k=0 segment capacity (eop_init). Fill-order-proof:
+    # selecting segments by cost < 0 breaks when the penalty p is 0.
+    gw = model_df.loc[model_df.index.str.contains('GW_') &
+                      model_df.index.str.contains('FINAL')].copy()
+    gw['res'] = gw['i'].str.split('.').str[0]
+    gw_total_od = 0.0
+    for res, grp in gw.groupby('res'):
+      meta = self.r_dict.get(res)
+      if not meta or meta.get('type') != 2:
+        continue
+      ub0 = grp.loc[grp['k'] == 0, 'upper_bound'].sum()
+      total = grp['flow'].sum()
+      if total < ub0:
+        gw_total_od += ub0 - total
 
-    # calculate groundwater volume change
-    gw_change = gw.flow-gw.upper_bound
-
-    # query out overdrafted gw reservoirs and calculate total overdraft
-    gw_od = gw_change.iloc[np.where(gw_change<0)]
-    gw_total_od = (-1*gw_od).sum()
-    
     return gw_total_od
 
 
