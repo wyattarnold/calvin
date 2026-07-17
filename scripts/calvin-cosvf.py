@@ -1,9 +1,12 @@
 """
 Limited foresight run — solves the annual COSVF sequence with fixed penalty parameters.
 
-Model dir: my-models/calvin-cosvf/
+Model dir: my-models/calvin-cosvf/ by default, or pass one as the first
+argument (verbatim path, e.g. ./my-models/calvin-cosvf-canon):
   links.csv                — single water-year template network
-  cosvf-params.csv         — penalty parameters (from EA or manual)
+  cosvf-params.csv         — penalty parameters (from EA or manual;
+                             calvin/data/cosvf_params_canonical.csv is the
+                             canonical EA-derived vector)
   r-dict.json              — reservoir metadata
   inflows.csv              — monthly inflows for full period
   variable-constraints.csv — time-varying link bounds
@@ -24,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from report import generate_report
 from run_config import load_config
 
-MODEL_DIR  = './my-models/calvin-cosvf'
+MODEL_DIR  = sys.argv[1] if len(sys.argv) > 1 else './my-models/calvin-cosvf'
 cfg        = load_config('calvin-cosvf', MODEL_DIR)
 
 DATA_PATH  = cfg['run']['data_path']

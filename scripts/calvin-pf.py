@@ -1,7 +1,8 @@
 """
 Perfect foresight run — solves the full 82-year network as a single LP.
 
-Model dir: my-models/calvin-pf/
+Model dir: my-models/calvin-pf/ by default, or pass one as the first
+argument (verbatim path, e.g. ./my-models/calvin-pf-scaled):
   links82yr.csv  — time-expanded network (auto-generated on first run)
   results/       — output CSVs written here
 
@@ -21,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from report import generate_report
 from run_config import load_config
 
-MODEL_DIR  = './my-models/calvin-pf'
+MODEL_DIR  = sys.argv[1] if len(sys.argv) > 1 else './my-models/calvin-pf'
 cfg        = load_config('calvin-pf', MODEL_DIR)
 
 DATA_PATH  = cfg['run']['data_path']
@@ -33,6 +34,31 @@ LINKS_FILE = os.path.join(MODEL_DIR, 'links82yr.csv')
 RESULT_DIR = os.path.join(MODEL_DIR, 'results')
 
 os.makedirs(RESULT_DIR, exist_ok=True)
+
+# ---------------------------------------------------------------------------
+# HiGHS basis warm start (mirrors calvin-pf-cap.py): every solve saves its
+# optimal basis to results/highs.bas; a variant run with the same links file
+# and only bound changes (scenario edits) can pre-load a baseline's basis
+# via [run] warm_start_basis. NOTE: plain-PF bases and
+# pf-cap bases are not interchangeable — the capacity model adds X_cap
+# columns and coupling rows, so the LP shapes differ.
+# ---------------------------------------------------------------------------
+SOLVER_OPTIONS = dict(cfg['run'].get('solver_options', {}))
+if SOLVER == 'highs':
+    SOLVER_OPTIONS.setdefault('write_basis_file',
+                              os.path.join(RESULT_DIR, 'highs.bas'))
+    warm = cfg['run'].get('warm_start_basis', '')
+    if warm:
+        if not os.path.isabs(warm):
+            warm = os.path.normpath(os.path.join(MODEL_DIR, warm))
+        if os.path.isfile(warm):
+            SOLVER_OPTIONS['read_basis_file'] = warm
+            if SOLVER_OPTIONS.pop('solver', None):
+                print('warm start: dropping solver algorithm override so '
+                      'the basis is used')
+            print('warm start from basis: %s' % warm)
+        else:
+            print('warm_start_basis not found, starting cold: %s' % warm)
 
 # ---------------------------------------------------------------------------
 # Build links file if not already present
@@ -53,7 +79,24 @@ if not os.path.isfile(LINKS_FILE):
 # ---------------------------------------------------------------------------
 calvin = CALVIN(linksfile=LINKS_FILE, logdir=MODEL_DIR)
 calvin.create_pyomo_model(debug_mode=False)
-calvin.solve_pyomo_model(solver=SOLVER, nproc=NPROC, debug_mode=False)
+try:
+    solved = calvin.solve_pyomo_model(solver=SOLVER, nproc=NPROC,
+                                      debug_mode=False,
+                                      solver_options=SOLVER_OPTIONS)
+except ValueError:
+    # stale/mismatched basis file: HiGHS rejects it and the appsi result
+    # parser chokes. Retry cold.
+    if 'read_basis_file' not in SOLVER_OPTIONS:
+        raise
+    print('warm start failed (basis does not match this model); '
+          'retrying cold')
+    SOLVER_OPTIONS.pop('read_basis_file')
+    solved = calvin.solve_pyomo_model(solver=SOLVER, nproc=NPROC,
+                                      debug_mode=False,
+                                      solver_options=SOLVER_OPTIONS)
+if not solved:
+    sys.exit('Solve did not reach an optimal solution; see log. '
+             'No results written.')
 
 model = calvin.model_to_dataframe()
 

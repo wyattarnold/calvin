@@ -1,0 +1,72 @@
+# Default config for scripts/calvin-pf-cap.py
+# Copied to my-models/calvin-pf-cap/config.toml on first run; edit that copy
+# for experiments.
+
+[run]
+solver    = "highs"
+nproc     = 1
+data_path = "../calvin-network-data/data"
+# tee = true                      # show solver iteration log
+# Warm start: every solve writes its optimal basis to results/highs.bas.
+# Point warm_start_basis at a structurally identical run's basis (same
+# links + facilities; only bounds may differ) to reoptimize with dual
+# simplex instead of solving cold. Relative paths resolve against the
+# model dir. A mismatched basis falls back to a cold start automatically.
+# warm_start_basis = "../calvin-pf-cap-market/results/highs.bas"
+# One-shot COLD PF solves are usually fastest with barrier + crossover:
+# [run.solver_options]
+# solver = "ipm"                  # HiGHS algorithm choice (this key is HiGHS's own "solver" option)
+# run_crossover = "on"            # keep on: basic solution -> clean duals for capacity_duals.csv
+
+[network]
+# constrain_ending = "gw"   # no net GW overdraft (ending storage >= initial
+#                           # per basin); links file becomes links82yr-nogwod.csv
+# node_lb_overrides = { SR_SHA = 650, SR_CLE = 500 }
+
+[capacity]
+# Blank paths fall back to calvin/data/facilities.csv and facility_profiles.csv
+facilities_csv = ""
+profiles_csv   = ""
+# Legacy Desal node arcs: "keep" ($2,072/AF unlimited backstop),
+# "existing" (Carlsbad at U511 + Santa Barbara at U406 only), or "retire"
+legacy_desal   = "existing"
+# true (default): take-or-pay — built capacity must run at >= alpha each
+# month. false: the classic CALVIN assumption — capacity may idle and turn
+# on only in the worst water-availability years.
+enforce_alpha  = true
+discount_rate  = 0.04
+facility_life  = 30
+
+[capacity.cap_groups]
+# Shared ceilings (TAF/yr) across facilities tagged with the same cap_group
+sc_effluent  = 500.0
+bay_effluent = 160.0
+
+[scenario]
+# Institutionally constrained scenario: ag delivery floors + GW pumping caps
+# anchored to the unconstrained market run's OWN flows (Howitt et al. 1999
+# Policy 2 analog), plus native-GW export closures. Set enabled = false (or
+# delete this table) for the unconstrained market run used as the reference.
+#
+# Market-anchored bounds cannot bind the market run itself; the headline
+# configuration pairs this layer with [network] constrain_ending = "gw"
+# (no net GW overdraft) — nogwod removes the mined supply (the od market
+# mines ~2.7 MAF/yr) while the floors/caps block the trading and
+# GW-substitution escapes.
+enabled            = true
+# Results dir of a completed unconstrained market run; relative paths
+# resolve against the model dir.
+reference_results  = "../calvin-pf-cap-market/results"
+ag_floor_fraction  = 0.95   # ag keeps >=95% of market deliveries (2-5% tradable)
+urban_floor_fraction = 0.0  # optional Policy-2 completeness knob; off by default
+# Policy-3 analog: cap ag deliveries at fraction x reference (must be >=
+# ag_floor_fraction; 0.0 = off). Shortage CSVs then measure against the
+# ceiling, not full demand — reconstruct from scenario_adjustments.csv.
+ag_ceiling_fraction = 0.0
+gw_pump_cap_factor = 1.0    # GW pumping capped at market monthly levels
+# Native-GW export arcs to zero vs keep open. HGP19-D851 (Semitropic) is
+# closed because in-model it exports native GW (the market runs pump it with
+# zero prior banking recharge); true bank constructs (GW_KRN, GW_HF) start
+# empty so recovery is self-limited, and Owens is LADWP's real export.
+gw_export_close = ["HGP21-C98", "HGP19-D851"]
+gw_export_keep  = ["HGPKRN-D865", "HGPHF-PMP_JH", "HGPOW-C120"]

@@ -2,6 +2,7 @@ __version__ = "2026.02.10"
 
 try:
     from .calvin import CALVIN
+    from .capacity import CALVINCap
     from .postprocessor import postprocess, aggregate_regions, combine_annual_results
 except ImportError:
     pass  # pyomo not available (e.g. when running the web app only)
