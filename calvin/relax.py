@@ -41,6 +41,7 @@ HiGHS-only, by the two-stage-cap thread convention. Sibling to
 ``calvin/env_flow.py`` (same backend-neutral row/column spec pattern).
 """
 from collections import namedtuple
+from time import perf_counter
 
 import numpy as np
 import pandas as pd
@@ -314,3 +315,113 @@ def solve_two_phase(m, floors, weights=None, options=None, log=None):
   return RelaxSolution(relaxed=True, total_taf=total_taf,
                        weighted_relaxation=float(weighted_R),
                        objective=m.objective(), report=report)
+
+
+def relax_solve_persistent(m, handle, weights=None, options=None, log=None,
+                           phase_presolve=False):
+  """One cell's two-phase solve on a model that ALREADY carries the elastic
+  scaffolding (``add_relaxation`` was called once up front).
+
+  Unlike :func:`solve_two_phase` — which builds and tears the relaxation per
+  call — this assumes a persistent, warm-started model reused across a whole
+  grid: the caller has already reset the arc bounds to this cell's future +
+  institutional values (``set_arc_bounds``), leaving the intrinsic floor arcs
+  freed and their ``x + s >= l`` rows in place. Here we reset the slacks to a
+  clean hard-floor state (fixed at 0), try a plain economic solve warm from the
+  previous cell's basis, and only on infeasibility run the two lexicographic
+  phases. Same minimal-relaxation semantics as :func:`solve_two_phase`, but the
+  model — and its basis — carry over, so every cell after the first warm-restarts.
+
+  :param handle: the :class:`RelaxHandle` returned by the one-time
+    ``add_relaxation`` (its slack set is the fixed intrinsic-floor catalog).
+  :param phase_presolve: force HiGHS presolve **on** for the two relaxation
+    phases. Default False. This was an experiment to fix the observation that the
+    plain attempt warm-restarts ~6x (942s cold -> 152s warm) but phase 1 — an
+    objective swap to min-shortfall — degrades badly on the carried-over basis
+    (>13 min). Forcing presolve on made phase 1 *worse* (re-presolving the 3M-col
+    augmented model cost >20 min), so it stays off. The takeaway: warm-start pays
+    off for the plain economic solve (the Phase-3 Benders workhorse), NOT for the
+    two-phase relaxation, whose phases belong on a fresh model (``solve_two_phase``).
+  :returns: :class:`RelaxSolution`.
+  """
+  weights = weights or CATEGORY_WEIGHTS
+  plain_opts = dict(options or {})
+  plain_opts.setdefault('presolve', 'choose')     # warm once a basis exists
+  phase_opts = dict(options or {})
+  if phase_presolve:
+    phase_opts['presolve'] = 'on'                 # re-presolve; drop the bad basis
+
+  def _info(msg, *a):
+    if log is not None:
+      log.info(msg, *a)
+
+  empty = RelaxHandle(floors=[], slack_meta={}, slack_keys=[], weights=weights)
+  if not handle.slack_keys:                       # no floors catalogued
+    m.solve(need_duals=True, options=plain_opts, raise_on_infeasible=True)
+    return RelaxSolution(relaxed=False, total_taf=0.0, weighted_relaxation=0.0,
+                         objective=m.objective(),
+                         report=relaxation_report(m, empty))
+
+  slack_idx = np.array([m.extra_cols[k] for k in handle.slack_keys],
+                       dtype=np.int32)
+  slack_w = np.array([weights.get(handle.slack_meta[k].category, 1.0)
+                      for k in handle.slack_keys], dtype=float)
+  floor_l = np.array([handle.slack_meta[k].l for k in handle.slack_keys],
+                     dtype=float)
+  z = np.zeros(len(slack_idx))
+  n = m.n_arc_cols
+  base_idx = np.arange(n, dtype=np.int32)
+
+  # --- clean start: hard floors (slacks pinned to 0, unpriced) -------------
+  m.set_col_bounds(slack_idx, z, z)
+  m.set_col_costs(slack_idx, z)
+
+  # --- attempt 1: plain economic solve (warm) -----------------------------
+  t0 = perf_counter()
+  feas = m.solve(need_duals=True, options=plain_opts, raise_on_infeasible=False,
+                 log_iis=False)
+  _info('relax: plain attempt %.0fs (%s)', perf_counter() - t0,
+        'feasible' if feas else 'infeasible')
+  if feas:
+    _info('relax: feasible under real costs; no relaxation applied')
+    return RelaxSolution(relaxed=False, total_taf=0.0, weighted_relaxation=0.0,
+                         objective=m.objective(),
+                         report=relaxation_report(m, empty))
+
+  _info('relax: infeasible under real costs; targeted relaxation over %d '
+        'catalogued floors', len(handle.slack_keys))
+
+  # --- phase 1: minimize weighted shortfall (free slacks, zero arc costs) ---
+  m.set_col_bounds(slack_idx, z, floor_l)
+  m.set_col_costs(base_idx, np.zeros(n))
+  m.set_col_costs(slack_idx, slack_w)
+  t0 = perf_counter()
+  if not m.solve(need_duals=True, options=phase_opts, raise_on_infeasible=False,
+                 log_iis=False):
+    m.set_col_costs(base_idx, m.col_cost)
+    m._log_iis()
+    raise RuntimeError('relaxation infeasible: the conflict lies outside the '
+                       'catalogued floors (routing capacity or a delivery floor '
+                       'held hard) — see the IIS above')
+  t_p1 = perf_counter() - t0
+  weighted_R = m.objective()
+  caps = m.cap_values()
+  s1 = np.array([caps.get(k, 0.0) for k in handle.slack_keys], dtype=float)
+  total_taf = float(s1.sum())
+  _info('relax: phase-1 %.0fs, minimal relaxation = %.3f TAF (%.3g weighted) '
+        'across %d node-months', t_p1, total_taf, weighted_R,
+        int((s1 > 1e-6).sum()))
+
+  # --- phase 2: fix the shortfall, restore costs, re-optimize operation ----
+  m.set_col_bounds(slack_idx, s1, s1)
+  m.set_col_costs(slack_idx, z)
+  m.set_col_costs(base_idx, m.col_cost)
+  t0 = perf_counter()
+  m.solve(need_duals=True, options=phase_opts, raise_on_infeasible=True,
+          log_iis=True)
+  _info('relax: phase-2 %.0fs', perf_counter() - t0)
+
+  return RelaxSolution(relaxed=True, total_taf=total_taf,
+                       weighted_relaxation=float(weighted_R),
+                       objective=m.objective(),
+                       report=relaxation_report(m, handle))

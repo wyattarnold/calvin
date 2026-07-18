@@ -313,6 +313,23 @@ class HighsNetworkModel:
                             np.asarray(lowers, dtype=float),
                             np.asarray(uppers, dtype=float))
 
+  def set_arc_bounds(self, lower, upper):
+    """Bulk-replace ALL base-arc column bounds from two length-``n_arc_cols``
+    arrays (column order == the build df's row order), updating the mirror. The
+    per-cell bound reset for the persistent warm-start grid engine: a scenario's
+    future+institutional bounds are computed on a df copy, then pushed here in one
+    call so the same model warm-restarts across every cell. Extra/slack columns
+    are untouched (the relaxation driver owns those via :meth:`set_col_bounds`)."""
+    n = self.n_arc_cols
+    lo = np.asarray(lower, dtype=float)
+    hi = np.asarray(upper, dtype=float)
+    if len(lo) != n or len(hi) != n:
+      raise ValueError('set_arc_bounds expects length-%d arrays, got %d/%d'
+                       % (n, len(lo), len(hi)))
+    self.h.changeColsBounds(n, np.arange(n, dtype=np.int32), lo, hi)
+    self.col_lower = lo.copy()
+    self.col_upper = hi.copy()
+
   # -- solve ----------------------------------------------------------------
   def solve(self, need_duals=True, options=None, raise_on_infeasible=True,
             log_iis=True):
