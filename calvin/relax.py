@@ -56,16 +56,21 @@ CAT_MINFLOW = 'min_instream_flow'         # environmental river-reach floor
 CAT_TRANSFER = 'forced_transfer'          # refuge/urban-split/bypass EQT
 CAT_DEADPOOL = 'dead_pool_storage'        # reservoir operating minimum
 CAT_EOP = 'end_of_period_storage'         # forced ending-storage target
+CAT_DELIVERY = 'delivery_floor'           # institutional ag/urban delivery floor
 
 # Phase-1 penalty per category: which obligation breaks first (cheap) vs is
 # protected (expensive). Widely separated so the ordering is lexicographic in
 # practice, but phase 1 still minimizes the total weighted TAF relaxed.
-# Rationale (user decision "calibration first, protect regs"): depletion and
-# accounting splits are calibration artifacts and absorb the drought first;
-# environmental/regulatory flows are the meaningful cost.
+# Rationale (user decision "calibration first, protect regs"): CALSIM depletions
+# and accounting splits are calibration artifacts, so they absorb the drought
+# first; a contract delivery deficiency is the measurable cost-of-inaction
+# damage, so it absorbs next, before any physical storage or regulatory floor is
+# touched; environmental/regulatory flows are the most protected and their
+# shortfall is the meaningful signal.
 CATEGORY_WEIGHTS = {
     CAT_DEPLETION: 1.0,
     CAT_TRANSFER: 1.0,
+    CAT_DELIVERY: 2.0,
     CAT_DEADPOOL: 10.0,
     CAT_EOP: 10.0,
     CAT_MINFLOW: 1_000.0,
@@ -128,7 +133,7 @@ def _classify(ib, jb, lb, ub):
   return None
 
 
-def relaxable_floors(df):
+def relaxable_floors(df, delivery_links=None):
   """Catalog the hard lower-bound floors that a drought could make infeasible.
 
   Runs on the **final** links df — after futures + ``scenario.apply_delivery_floors``
@@ -136,11 +141,18 @@ def relaxable_floors(df):
   the forced rim inflows and initial storage (the scenario givens). Over-inclusion
   is harmless: a floor that never binds gets a zero slack and stays fully enforced.
 
+  :param delivery_links: optional set of base ``'i-j'`` link names (from
+    ``scenario.demand_links``) that the institutional layer floored. A floor on
+    one of these is reclassified from the generic internal min-flow class to
+    :data:`CAT_DELIVERY`, so a contract deficiency is priced and reported apart
+    from a true environmental instream-flow floor. Leave ``None`` for a raw
+    (market) network with no injected delivery floors.
   :returns: list of :class:`Floor`.
   """
   sub = df[df['lower_bound'] > 0]
   if sub.empty:
     return []
+  delivery_links = set(delivery_links) if delivery_links else None
   i = sub['i'].to_numpy()
   j = sub['j'].to_numpy()
   k = sub['k'].to_numpy()
@@ -154,9 +166,13 @@ def relaxable_floors(df):
     cat = _classify(ib[n], jb[n], lb[n], ub[n])
     if cat is None:
       continue
+    ij = '%s-%s' % (ib[n], jb[n])
+    if delivery_links is not None and cat in (CAT_MINFLOW, CAT_TRANSFER) \
+        and ij in delivery_links:
+      cat = CAT_DELIVERY
     arc = (i[n], j[n], k[n])
     node = str(ib[n]) if jb[n] in ('SINK', 'FINAL', 'Req_Delta') or ib[n] == jb[n] \
-        else '%s-%s' % (ib[n], jb[n])
+        else ij
     floors.append(Floor(arc=arc, l=float(lb[n]), category=cat, node=node,
                         month=_month_label(i[n], j[n])))
   return floors
