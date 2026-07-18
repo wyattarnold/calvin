@@ -1,0 +1,9 @@
+name,etype,region,unit,cap_cost_per_af,om_fixed_per_af_yr,alpha,max_expansion,life_yr,lead_time_yr,exp_group,ub_profile,notes
+sto_sha,storage_raise,USV,storage,2700,6,0.0,634,50,15,,,Shasta raise; 18000 $/AFY-yield x 0.15 yield/storage; max = USBR raise study
+sto_lvq,storage_raise,SJSB,storage,2700,6,0.0,115,50,10,,,Los Vaqueros expansion vs in-model 105 TAF pool
+tun_delta,conveyance_new,LSVD,flow,40000,0,0.0,360,50,15,,,Delta tunnel-class on the closed D503-PMP_ISOL_F intake; ~6000 cfs; 12000 $/AFY optimistic sensitivity
+fkc_restore,conveyance_restore,TB,flow,4000,0,0.0,60,30,6,,,FKC subsidence repair on C76-C688 + C688-C62; max PLACEHOLDER pending planning docs
+bank_kern,gw_bank,TB,flow,3500,0,0.0,30,30,5,,norcal_wet,Kern put/take program; capital on wet-season put capacity; max PLACEHOLDER
+firo_oro,firo,LSVD,storage,300,15,0.0,751,20,3,,firo_winter,Oroville flood-pool reoperation; PF = perfect forecast skill upper bound
+firo_fol,firo,LSVD,storage,300,15,0.0,670,20,3,,firo_winter,Folsom flood-pool reoperation; PF upper bound
+firo_bul,firo,LSVD,storage,300,15,0.0,330,20,3,,firo_winter,New Bullards Bar flood-pool reoperation; PF upper bound

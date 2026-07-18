@@ -51,6 +51,55 @@ def dict_insert(D, k1, k2, v, collision_rule = None):
       raise ValueError('Keys [%s][%s] already exist in dictionary' % (k1,k2))
 
 
+# ---------------------------------------------------------------------------
+# Backend-neutral read surface.  postprocess / _collect_links reach the solved
+# model through four accessors so the same code serves the Pyomo path and the
+# direct-HiGHS backend (calvin.highs_model).  Only 3 of the 12 output CSVs use
+# duals; the rest are primal-derived.
+# ---------------------------------------------------------------------------
+class _PyomoResults:
+  """Lazy read surface over a solved Pyomo model."""
+  def __init__(self, model):
+    self.m = model
+  def flow(self, s):
+    return self.m.X[s].value if s in self.m.X else 0.0
+  def dual_lower(self, s):
+    m = self.m
+    return m.dual.get(m.limit_lower[s], 0.0) if s in m.limit_lower else 0.0
+  def dual_upper(self, s):
+    m = self.m
+    return m.dual.get(m.limit_upper[s], 0.0) if s in m.limit_upper else 0.0
+  def node_dual(self, node):
+    m = self.m
+    return m.dual.get(m.flow[node], 0.0) if node in m.flow else 0.0
+
+
+class _DictResults:
+  """Read surface backed by plain dicts (the HiGHS backend's accessors)."""
+  def __init__(self, flows, node_duals, bound_duals):
+    self._flows = flows            # {(i,j,k): flow}
+    self._node = node_duals        # {node: dual}
+    self._bd = bound_duals         # {(i,j,k): (dual_lower, dual_upper)}
+  def flow(self, s):
+    return self._flows.get(s, 0.0)
+  def dual_lower(self, s):
+    return self._bd.get(s, (0.0, 0.0))[0]
+  def dual_upper(self, s):
+    return self._bd.get(s, (0.0, 0.0))[1]
+  def node_dual(self, node):
+    return self._node.get(node, 0.0)
+
+
+def _as_results(obj):
+  """Wrap a Pyomo model or a HighsNetworkModel in a uniform read surface."""
+  if isinstance(obj, (_PyomoResults, _DictResults)):
+    return obj
+  # HighsNetworkModel exposes these accessors; a Pyomo model does not.
+  if hasattr(obj, 'bound_duals') and hasattr(obj, 'arc_index'):
+    return _DictResults(obj.flows(), obj.node_duals(), obj.bound_duals())
+  return _PyomoResults(obj)
+
+
 def _collect_links(links, model, year, F, S, E, SV, SC, PV, PC, OC,
                    D_up, D_lo, EOP_storage, demand_set, pwp_set, op_set, eop=None):
   """Accumulate per-link results from a solved model into result dicts.
@@ -58,15 +107,19 @@ def _collect_links(links, model, year, F, S, E, SV, SC, PV, PC, OC,
   All dict arguments are modified in-place.  If *eop* is provided it is used
   to accumulate end-of-period storage totals (keyed by reservoir name).
 
+  ``model`` may be a solved Pyomo model, a HighsNetworkModel, or a pre-wrapped
+  results object — all are normalized through :func:`_as_results`.
+
   Shared by :func:`postprocess` and :class:`cosvfea._PostprocessCollector`.
   """
+  res = _as_results(model)
   for link in links:
     s = tuple(link[0:3])
     ub = float(link[6])
     unit_cost = float(link[3])
-    v  = model.X[s].value if s in model.X else 0.0
-    d1 = model.dual.get(model.limit_lower[s], 0.0) if s in model.limit_lower else 0.0
-    d2 = model.dual.get(model.limit_upper[s], 0.0) if s in model.limit_upper else 0.0
+    v  = res.flow(s)
+    d1 = res.dual_lower(s)
+    d2 = res.dual_upper(s)
 
     if '.' in link[0] and '.' in link[1]:
       n1, t1 = link[0].split('.')
@@ -159,8 +212,10 @@ def postprocess(df, model, resultdir=None, annual=False, year=None):
   pwp_nodes    = pd.read_csv(os.path.join(BASE_DIR, "data", "pwp_nodes.csv"),    index_col=0)
   op_nodes     = pd.read_csv(os.path.join(BASE_DIR, "data", "operation_nodes.csv"), index_col=0)
 
+  # normalize once (builds the HiGHS dicts a single time), reused below
+  res = _as_results(model)
   _collect_links(
-    links, model, year,
+    links, res, year,
     F, S, E, SV, SC, PV, PC, OC, D_up, D_lo, EOP_storage,
     set(demand_nodes.index), set(pwp_nodes.index), set(op_nodes.index),
     eop=EOP,
@@ -181,7 +236,7 @@ def postprocess(df, model, resultdir=None, annual=False, year=None):
   for node in nodes:
     if '.' in node:
       n3, t3 = node.split('.')
-      d3 = model.dual.get(model.flow[node], 0.0) if node in model.flow else 0.0
+      d3 = res.node_dual(node)
       dict_insert(D_node, n3, t3, d3)
 
   # write the output files

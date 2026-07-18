@@ -19,13 +19,13 @@ app = [
 ]
 solver = [
     "pyomo",
-    "highspy",
+    "highspy>=1.11",
     "tqdm",
     "sympy",
 ]
 ea = [
     "pyomo",
-    "highspy",
+    "highspy>=1.11",
     "tqdm",
     "sympy",
     "deap",

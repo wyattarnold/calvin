@@ -1,0 +1,15 @@
+expansion,i,j,coeff,ub_profile_override,amplitude_override,om_var_per_af,static_cap
+sto_sha,SR_SHA,SR_SHA,1.0,,,0,
+sto_sha,SR_SHA,FINAL,1.0,,,0,
+sto_lvq,SR_LVQ,SR_LVQ,1.0,,,0,
+sto_lvq,SR_LVQ,FINAL,1.0,,,0,
+tun_delta,D503,PMP_ISOL_F,1.0,,,20,
+fkc_restore,C76,C688,1.0,,,10,
+fkc_restore,C688,C62,1.0,,,0,
+bank_kern,D865,HARKRN,1.0,,,20,
+bank_kern,HARKRN,GW_KRN,1.0,,,0,
+bank_kern,GW_KRN,HGPKRN,1.0,flat,0.944,50,
+bank_kern,HGPKRN,D865,1.0,flat,,103.6,
+firo_oro,SR_ORO,SR_ORO,1.0,,,0,3538
+firo_fol,SR_FOL,SR_FOL,1.0,,,0,975
+firo_bul,SR_BUL,SR_BUL,1.0,,,0,930

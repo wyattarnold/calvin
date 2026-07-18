@@ -331,6 +331,7 @@ class CALVIN():
     model.dual = Suffix(direction=Suffix.IMPORT)
 
     self.model = model
+    self._backend = 'pyomo'
 
 
   def solve_pyomo_model(self, solver='highs', nproc=1, debug_mode=False, maxiter=10, tee=False, save_json=False,
@@ -568,12 +569,15 @@ class CALVIN():
 
   def model_to_dataframe(self):
       """
-      Converts the model to a pandas dataframe. 
+      Converts the model to a pandas dataframe.
       Useful for computing objective values (costs) without having to postprocess.
-      
-      :returns model_df: (Pandas dataframe) Dataframe of upper_bound, cost, 
+
+      :returns model_df: (Pandas dataframe) Dataframe of upper_bound, cost,
         and flow (solution) values for each link
       """
+      if getattr(self, '_backend', 'pyomo') == 'highs':
+        return self.hmodel.to_dataframe()
+
       def _param_series(param, col):
         keys = list(param.keys())
         return pd.DataFrame(
@@ -593,3 +597,174 @@ class CALVIN():
       model_df.set_index('link', inplace=True)
 
       return model_df
+
+  # -------------------------------------------------------------------------
+  # Direct-HiGHS backend (alongside Pyomo).  Builds the same network LP into a
+  # persistent highspy.Highs() model, skipping the Pyomo object graph and the
+  # LP-file handoff.  See calvin/highs_model.py.  The result surface
+  # (model_to_dataframe, postprocess) is backend-neutral; COSVF stays on Pyomo.
+  # -------------------------------------------------------------------------
+  def create_highs_model(self, debug_mode=False, debug_cost=2e10, cosvf_mode=False):
+    """Build the network LP directly in HiGHS.  Mirrors create_pyomo_model's df
+    preparation and the three cost regimes, then assembles a HighsNetworkModel.
+
+    :returns: the HighsNetworkModel (also stored as ``self.hmodel``).
+    """
+    from calvin.highs_model import HighsNetworkModel
+
+    if not debug_mode and self.df.index.str.contains('DBUG').any():
+      df = self.remove_debug_links()   # rebuilds self.nodes / self.links too
+    else:
+      df = self.df
+
+    self.log.info('Creating HiGHS Model (debug=%s)' % debug_mode)
+    self.hmodel = HighsNetworkModel(log=self.log)
+    self.hmodel.build(df, self.nodes, debug_mode=debug_mode,
+                      cosvf_mode=cosvf_mode, debug_cost=debug_cost)
+    self._backend = 'highs'
+    return self.hmodel
+
+  def solve_highs_model(self, solver='highs', nproc=1, debug_mode=False,
+                        maxiter=10, solver_options=None):
+    """Solve the HiGHS model (must follow create_highs_model).
+
+    Mirrors solve_pyomo_model: in debug mode it runs the iterative
+    bound-relaxation loop (fix_debug_flows_highs) with the same stall/maxiter
+    logic; otherwise a single solve that raises RuntimeError on infeasibility.
+    """
+    opts = {}
+    if nproc > 1:
+      opts['threads'] = nproc
+    if solver_options:
+      opts.update(solver_options)
+    m = self.hmodel
+
+    if debug_mode:
+      run_again = True
+      i = 0
+      vol_total = 0
+      prev_debug = float('inf')
+      stalled = False
+      while run_again and i < maxiter:
+        self.log.info('-----Solving HiGHS Model (debug=%s)' % debug_mode)
+        m.solve(need_duals=True, options=opts)
+        self.log.info('Finished. Fixing debug flows...')
+        run_again, vol, total_debug = self.fix_debug_flows_highs()
+        i += 1
+        vol_total += vol
+        if run_again and total_debug >= prev_debug * 0.99:
+          stalled = True
+          break
+        prev_debug = total_debug
+
+      if not run_again:
+        self.log.info('All debug flows eliminated (iter=%d, vol=%0.2f)'
+                      % (i, vol_total))
+        return True
+      elif stalled:
+        self.log.warning('Debug stalled at %.2e TAF after %d iterations; '
+                         'no further improvement possible.' % (total_debug, i))
+        return False
+      else:
+        self.log.warning('Debug mode maximum iterations reached (%d); '
+                         '%.2e TAF of debug flows remain.' % (maxiter, total_debug))
+        return False
+
+    self.log.info('-----Solving HiGHS Model (debug=%s)' % debug_mode)
+    m.solve(need_duals=True, options=opts)  # raises RuntimeError if infeasible
+    self.log.info('Optimal Solution Found (debug=%s).' % debug_mode)
+    return True
+
+  def fix_debug_flows_highs(self, tol=1e-7):
+    """HiGHS port of fix_debug_flows: relieve residual DBUG valve flow by raising
+    UB on DBUGSNK sources (surplus) or lowering LB on DBUGSRC descendants
+    (deficit).  Mutates both the HiGHS column bounds and ``self.df`` (so
+    get_bound_adjustments still audits the relaxation).
+
+    :returns: (run_again, vol_total, total_debug) — same contract as
+      fix_debug_flows.
+    """
+    df, m = self.df, self.hmodel
+    flows = m.flows()
+    bd = m.bound_duals()
+
+    dbix = (df.i.str.contains('DBUGSRC') | df.j.str.contains('DBUGSNK'))
+    debuglinks = df[dbix].values
+
+    total_debug = sum(max(flows.get(tuple(dbl[0:3]), 0.0) or 0, 0)
+                      for dbl in debuglinks)
+    run_again = False
+    vol_total = 0
+
+    for dbl in debuglinks:
+      s = tuple(dbl[0:3])
+      flow_val = flows.get(s, 0.0)
+      if flow_val <= tol:
+        continue
+      run_again = True
+      if 'DBUGSNK' in dbl[1]:
+        vol_total += self._raise_upper_bounds_highs(dbl, df, m, flow_val)
+      elif 'DBUGSRC' in dbl[0]:
+        vol_total += self._lower_downstream_bounds_highs(dbl, df, m, flow_val, bd)
+
+    self.df = df
+    return run_again, vol_total, total_debug
+
+  def _raise_upper_bounds_highs(self, dbl, df, m, flow_val):
+    """Raise UB on outgoing links of a DBUGSNK source node (surplus water)."""
+    vol = 0
+    raiselinks = df[(df.i == dbl[0]) & ~df.j.str.contains('DBUGSNK')].values
+    for l in raiselinks:
+      s2 = tuple(l[0:3])
+      c = m.arc_index[s2]
+      iv = m.col_upper[c]
+      v = flow_val * 1.2
+      new_ub = iv + v
+      m.set_bound(s2, m.col_lower[c], new_ub)
+      vol += v
+      self.log.info('%s UB raised by %0.2f (%0.2f%%)'
+                    % (l[0] + '_' + l[1], v, v * 100 / iv if iv else 0.0))
+      df.loc['_'.join(str(x) for x in l[0:3]), 'upper_bound'] = new_ub
+    return vol
+
+  def _lower_downstream_bounds_highs(self, dbl, df, m, flow_val, bd, max_depth=10):
+    """Reduce LB on downstream links of a DBUGSRC node (deficit water)."""
+    vol_to_reduce = max(flow_val * 1.2, 0.5)
+    self.log.info('Volume to reduce: %.2e' % vol_to_reduce)
+
+    children = [dbl[1]]
+    for _ in range(max_depth):
+      children += df[df.i.isin(children) & ~df.j.str.contains('DBUGSNK')].j.tolist()
+    children = set(children)
+
+    reducelinks = (df[df.i.isin(children) & (df.lower_bound > 0)]
+                   .sort_values(by='lower_bound', ascending=False).values)
+    if reducelinks.size == 0:
+      raise RuntimeError('Not possible to reduce LB on links with origin %s by '
+                         'volume %0.2f' % (dbl[1], vol_to_reduce))
+
+    carryover = ['SR_', 'INITIAL', 'FINAL', 'GW_']
+    vol = 0
+    for l in reducelinks:
+      if vol_to_reduce == 0:
+        break
+      s2 = tuple(l[0:3])
+      c = m.arc_index[s2]
+      iv = m.col_lower[c]
+      dl = bd.get(s2, (0.0, 0.0))[0]
+      if iv > 0 and dl > 1e6:
+        v = min(vol_to_reduce, iv)
+        if any(x in l[0] for x in carryover) and any(x in l[1] for x in carryover):
+          v = min(v, max(25.0, 0.1 * iv))
+        new_lb = iv - v
+        m.set_bound(s2, new_lb, m.col_upper[c])
+        vol_to_reduce -= v
+        vol += v
+        self.log.info('%s LB reduced by %.2e (%0.2f%%). Dual=%.2e'
+                      % (l[0] + '_' + l[1], v, v * 100 / iv, dl))
+        df.loc['_'.join(str(x) for x in l[0:3]), 'lower_bound'] = new_lb
+
+    if vol_to_reduce > 0:
+      self.log.info('Debug -> %s: could not reduce full amount (%.2e left)'
+                    % (dbl[1], vol_to_reduce))
+    return vol
