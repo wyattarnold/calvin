@@ -675,6 +675,40 @@ class CALVIN():
     self.log.info('Optimal Solution Found (debug=%s).' % debug_mode)
     return True
 
+  def solve_highs_relaxed(self, floors=None, weights=None, solver='highs',
+                          nproc=1, solver_options=None):
+    """Solve the HiGHS model with targeted feasibility relaxation instead of the
+    debug-flow loop (must follow ``create_highs_model(debug_mode=False)``).
+
+    Tries a plain solve first; if the future is infeasible, relaxes only the
+    catalogued hard floors (required outflows, instream flows, dead-pool /
+    ending storage) by the minimum needed and re-optimizes the economic
+    operation on the relaxed network. See :mod:`calvin.relax`.
+
+    :param floors: precomputed catalog (``relaxable_floors(self.df)`` by
+      default — built on the current, post-scenario df).
+    :param weights: per-category phase-1 penalties (``CATEGORY_WEIGHTS`` default).
+    :returns: a :class:`calvin.relax.RelaxSolution` (also stored as
+      ``self.relaxation``); the solved flows are read the usual way via
+      ``model_to_dataframe`` / ``postprocess``.
+    """
+    from calvin.relax import relaxable_floors, solve_two_phase, CATEGORY_WEIGHTS
+
+    opts = {}
+    if nproc > 1:
+      opts['threads'] = nproc
+    if solver_options:
+      opts.update(solver_options)
+    if floors is None:
+      floors = relaxable_floors(self.df)
+    sol = solve_two_phase(self.hmodel, floors, weights=weights or CATEGORY_WEIGHTS,
+                          options=opts, log=self.log)
+    self.relaxation = sol
+    if sol.relaxed:
+      self.log.info('Relaxed %.2f TAF of hard floors across %d node-months to '
+                    'reach feasibility.' % (sol.total_taf, len(sol.report)))
+    return sol
+
   def fix_debug_flows_highs(self, tol=1e-7):
     """HiGHS port of fix_debug_flows: relieve residual DBUG valve flow by raising
     UB on DBUGSNK sources (surplus) or lowering LB on DBUGSRC descendants

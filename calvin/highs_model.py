@@ -291,13 +291,39 @@ class HighsNetworkModel:
     self.col_lower[cols] = lo
     self.col_upper[cols] = hi
 
+  def set_col_costs(self, indices, costs):
+    """Vectorized set of objective coefficients by raw column index (base arcs
+    or extra columns). Does not touch the ``col_cost`` mirror — the caller owns
+    it (used for the two-phase relaxation objective swap, where ``col_cost``
+    stays the real-cost source of truth)."""
+    idx = np.asarray(indices, dtype=np.int32)
+    if len(idx) == 0:
+      return
+    self.h.changeColsCost(len(idx), idx, np.asarray(costs, dtype=float))
+
+  def set_col_bounds(self, indices, lowers, uppers):
+    """Vectorized set of column bounds by raw column index (base arcs or extra
+    columns). Unlike :meth:`set_bounds` (keyed by arc), this does not update the
+    base-arc mirror, so it is safe on extra/slack columns (index >= n_arc_cols).
+    Used to fix relaxation slacks at their phase-1 values in phase 2."""
+    idx = np.asarray(indices, dtype=np.int32)
+    if len(idx) == 0:
+      return
+    self.h.changeColsBounds(len(idx), idx,
+                            np.asarray(lowers, dtype=float),
+                            np.asarray(uppers, dtype=float))
+
   # -- solve ----------------------------------------------------------------
-  def solve(self, need_duals=True, options=None, raise_on_infeasible=True):
+  def solve(self, need_duals=True, options=None, raise_on_infeasible=True,
+            log_iis=True):
     """Run HiGHS on the current model (warm from the persistent basis).
 
     :param need_duals: keep crossover on so reduced costs / row duals are clean.
     :param options: extra ``setOptionValue`` pairs (dict), e.g.
       ``{'solver': 'simplex', 'threads': 4}``.
+    :param log_iis: on infeasibility, log the native IIS. Disable for a solve
+      that is *expected* to possibly fail (e.g. the first attempt of a targeted
+      relaxation), since ``getIis`` on the full model is expensive.
     :returns: True if optimal. Raises RuntimeError on infeasible unless
       ``raise_on_infeasible`` is False.
     """
@@ -327,7 +353,7 @@ class HighsNetworkModel:
     self._sol = None
     self._obj = None
     self._log('error', 'HiGHS status: %s' % h.modelStatusToString(status))
-    if status == highspy.HighsModelStatus.kInfeasible:
+    if status == highspy.HighsModelStatus.kInfeasible and log_iis:
       self._log_iis()
     if raise_on_infeasible:
       raise RuntimeError('Problem Infeasible (HiGHS status %s).'
