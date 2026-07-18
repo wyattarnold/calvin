@@ -34,6 +34,11 @@ legacy_desal   = "existing"
 # month. false: the classic CALVIN assumption — capacity may idle and turn
 # on only in the worst water-availability years.
 enforce_alpha  = true
+# Arc-capacity expansions on EXISTING arcs (storage raises, Delta tunnel,
+# canal restoration, Kern banking, FIRO). Blank = OFF; "default" loads
+# calvin/data/expansions.csv + expansion_arcs.csv; or give explicit paths.
+expansions_csv     = ""
+expansion_arcs_csv = ""
 discount_rate  = 0.04
 facility_life  = 30
 
@@ -70,3 +75,18 @@ gw_pump_cap_factor = 1.0    # GW pumping capped at market monthly levels
 # empty so recovery is self-limited, and Owens is LADWP's real export.
 gw_export_close = ["HGP21-C98", "HGP19-D851"]
 gw_export_keep  = ["HGPKRN-D865", "HGPHF-PMP_JH", "HGPOW-C120"]
+
+# --- Bay-Delta environmental-flow lever (calvin.env_flow) -------------------
+# Percent-of-unimpaired instream flows, year-type dependent. Off by default;
+# set enabled = true (cost-of-inaction study). Per-tributary reservoir-release
+# reaches (10 major Delta tributaries in calvin/data/delta_tributaries.csv)
+# each require >= pct(year type) x that tributary's unimpaired inflow, PLUS an
+# aggregate Delta-outflow floor max(existing Req_Delta requirement, sum of the
+# tributary requirements). Year type = system-wide terciles of total
+# Delta-watershed unimpaired inflow. Annual (water-year) aggregation.
+[env_flow]
+enabled    = false
+pct_wet    = 0.55
+pct_middle = 0.40
+pct_dry    = 0.30
+aggregate  = true   # add the aggregate Delta-outflow max() constraint

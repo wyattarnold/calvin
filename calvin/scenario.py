@@ -265,17 +265,22 @@ def apply_delivery_ceilings(df, ref_flows, links, fraction, log=None):
   return n_groups
 
 
-def apply_gw_pump_caps(df, ref_flows, factor=1.0, log=None):
+def apply_gw_pump_caps(df, ref_flows, factor=1.0, log=None, protect=None):
   """
   Cap GW_xx -> HGPxx pumping choke arcs at ``factor`` x reference flow.
 
   :param df: links DataFrame (mutated in place)
   :param factor: cap as a multiple of reference flow (rounded up)
+  :param protect: optional Index of df row labels to leave uncapped
+    (injected expansion segments — new infrastructure, not the existing
+    system the caps freeze)
   :returns: number of arc rows capped
   """
   i_base = _split_base(df.i)
   j_base = _split_base(df.j)
   mask = i_base.str.startswith('GW_') & j_base.str.startswith('HGP')
+  if protect is not None and len(protect):
+    mask &= ~df.index.isin(protect)
   if not mask.any():
     raise ValueError('No GW->HGP pumping choke arcs found in this network')
 
@@ -357,7 +362,7 @@ def bound_adjustments(df, initial_bounds):
 
 
 
-def apply_scenario(df, scenario, log=None):
+def apply_scenario(df, scenario, log=None, protect=None):
   """
   Apply the institutionally constrained scenario to a links DataFrame.
 
@@ -368,6 +373,8 @@ def apply_scenario(df, scenario, log=None):
     (default 0.0 = off; must be >= ag_floor_fraction when set),
     gw_pump_cap_factor (default 1.0; 0 disables),
     gw_export_close / gw_export_keep (arc name lists)
+  :param protect: optional Index of df row labels the scenario must not
+    touch (capacity-expansion segments injected by CALVINCap)
   :returns: audit DataFrame of every bound changed (see bound_adjustments)
   """
   known = {'enabled', 'reference_results', 'ag_floor_fraction',
@@ -404,7 +411,7 @@ def apply_scenario(df, scenario, log=None):
 
   gw_factor = scenario.get('gw_pump_cap_factor', 1.0)
   if gw_factor and gw_factor > 0:
-    apply_gw_pump_caps(df, ref, gw_factor, log=log)
+    apply_gw_pump_caps(df, ref, gw_factor, log=log, protect=protect)
 
   apply_gw_export_closures(
       df,

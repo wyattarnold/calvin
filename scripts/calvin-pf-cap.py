@@ -111,29 +111,31 @@ calvin = CALVINCap(
     discount_rate=CAP.get('discount_rate', 0.04),
     facility_life=CAP.get('facility_life', 30),
     cap_groups=CAP.get('cap_groups') or None,
+    expansions_csv=CAP.get('expansions_csv') or None,
+    expansion_arcs_csv=CAP.get('expansion_arcs_csv') or None,
+    exp_groups=CAP.get('exp_groups') or None,
     scenario=SCENARIO,
+    env_flow=cfg.get('env_flow') or None,
     logdir=MODEL_DIR,
 )
 if calvin.scenario_adjustments is not None:
     calvin.scenario_adjustments.to_csv(
         os.path.join(RESULT_DIR, 'scenario_adjustments.csv'))
-calvin.create_pyomo_model(debug_mode=False)
+calvin.create_highs_model(debug_mode=False)
 try:
-    solved = calvin.solve_pyomo_model(solver=SOLVER, nproc=NPROC,
+    solved = calvin.solve_highs_model(solver=SOLVER, nproc=NPROC,
                                       debug_mode=False,
-                                      tee=cfg['run'].get('tee', False),
                                       solver_options=SOLVER_OPTIONS)
-except ValueError:
-    # stale/mismatched basis file: HiGHS rejects it and the appsi result
-    # parser chokes on iteration_count = -1. Retry cold.
+except (ValueError, RuntimeError):
+    # stale/mismatched basis file: retry cold (HiGHS usually ignores a bad
+    # basis, but guard the read_basis_file path anyway).
     if 'read_basis_file' not in SOLVER_OPTIONS:
         raise
     print('warm start failed (basis does not match this model); '
           'retrying cold')
     SOLVER_OPTIONS.pop('read_basis_file')
-    solved = calvin.solve_pyomo_model(solver=SOLVER, nproc=NPROC,
+    solved = calvin.solve_highs_model(solver=SOLVER, nproc=NPROC,
                                       debug_mode=False,
-                                      tee=cfg['run'].get('tee', False),
                                       solver_options=SOLVER_OPTIONS)
 if not solved:
     sys.exit('Solve did not reach an optimal solution; see log. '
@@ -158,7 +160,10 @@ def compute_network_costs(model_df):
 short_cost, op_cost = compute_network_costs(model)
 
 capacity, cap_duals = calvin.capacity_results()
+expansions, exp_duals = calvin.expansion_results()
 capital_kperyr = capacity.capital_cost_kperyr.sum()
+if expansions is not None:
+    capital_kperyr += expansions.capital_cost_kperyr.sum()
 
 print('total cost={} $M/yr (incl. capital)'.format(
     round((short_cost + op_cost) / 82 / 1e3 + capital_kperyr / 1e3, 2)))
@@ -173,6 +178,15 @@ if len(built):
                  'capital_cost_kperyr', 'mv_capacity_kperyr',
                  'balance_gap']].to_string())
 
+if expansions is not None:
+    exp_built = expansions[expansions.xexp > 0.001]
+    print('\nBuilt expansions ({} of {}):'.format(len(exp_built),
+                                                  len(expansions)))
+    if len(exp_built):
+        print(exp_built[['xexp', 'unit', 'annual_tafy', 'xexp_max',
+                         'capital_cost_kperyr', 'mv_capacity_kperyr',
+                         'balance_gap']].to_string())
+
 gw_initial = model.loc[(model.index.str.contains('GW_')) & (model.index.str.contains('INITIAL'))]
 gw_final   = model.loc[(model.index.str.contains('GW_')) & (model.index.str.contains('FINAL'))]
 gw_change  = gw_final['flow'].values - gw_initial['lower_bound'].values
@@ -181,6 +195,9 @@ print('gw overdraft={} MAF/yr'.format(round(gw_od / 82 / 1e3, 2)))
 
 capacity.to_csv(os.path.join(RESULT_DIR, 'capacity.csv'))
 cap_duals.to_csv(os.path.join(RESULT_DIR, 'capacity_duals.csv'))
+if expansions is not None:
+    expansions.to_csv(os.path.join(RESULT_DIR, 'expansions.csv'))
+    exp_duals.to_csv(os.path.join(RESULT_DIR, 'expansion_duals.csv'))
 
-postprocess(calvin.df, calvin.model, RESULT_DIR)
+postprocess(calvin.df, calvin.hmodel, RESULT_DIR)
 generate_report(MODEL_DIR)
