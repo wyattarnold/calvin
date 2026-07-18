@@ -330,6 +330,20 @@ class HighsNetworkModel:
     self.col_lower = lo.copy()
     self.col_upper = hi.copy()
 
+  def clear_basis(self):
+    """Drop the retained simplex basis/solution, keeping the model and options.
+
+    The next solve starts cold. Needed after a warm dual-simplex solve proves the
+    model infeasible: it leaves the basis parked at an infeasible vertex, and
+    warm-starting a following solve (e.g. a relaxation phase 1) off that basis is
+    pathologically slow. Clearing it first makes that solve start clean."""
+    self.h.clearSolver()
+    self._sol = None
+    self._col_value = None
+    self._col_dual = None
+    self._row_dual = None
+    self._obj = None
+
   # -- solve ----------------------------------------------------------------
   def solve(self, need_duals=True, options=None, raise_on_infeasible=True,
             log_iis=True):

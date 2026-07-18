@@ -318,7 +318,7 @@ def solve_two_phase(m, floors, weights=None, options=None, log=None):
 
 
 def relax_solve_persistent(m, handle, weights=None, options=None, log=None,
-                           phase_presolve=False):
+                           reset_on_infeasible=True):
   """One cell's two-phase solve on a model that ALREADY carries the elastic
   scaffolding (``add_relaxation`` was called once up front).
 
@@ -334,22 +334,19 @@ def relax_solve_persistent(m, handle, weights=None, options=None, log=None,
 
   :param handle: the :class:`RelaxHandle` returned by the one-time
     ``add_relaxation`` (its slack set is the fixed intrinsic-floor catalog).
-  :param phase_presolve: force HiGHS presolve **on** for the two relaxation
-    phases. Default False. This was an experiment to fix the observation that the
-    plain attempt warm-restarts ~6x (942s cold -> 152s warm) but phase 1 — an
-    objective swap to min-shortfall — degrades badly on the carried-over basis
-    (>13 min). Forcing presolve on made phase 1 *worse* (re-presolving the 3M-col
-    augmented model cost >20 min), so it stays off. The takeaway: warm-start pays
-    off for the plain economic solve (the Phase-3 Benders workhorse), NOT for the
-    two-phase relaxation, whose phases belong on a fresh model (``solve_two_phase``).
+  :param reset_on_infeasible: when the warm plain attempt proves infeasibility by
+    dual simplex, it leaves the basis at an infeasible vertex — a poison pill that
+    makes phase 1 grind through millions of degenerate pivots (>13 min, vs ~90s
+    from a clean start; measured). Default True calls ``clear_basis`` after an
+    infeasible plain attempt so phase 1 starts cold instead of warm-starting off
+    that basis. (A ``presolve=on`` pass does NOT fix it — presolve detects the
+    infeasibility but leaves the loaded basis in place, so phase 1 still inherits
+    it.) Feasible cells never hit this and keep their warm-start. Set False for
+    the pure-warm baseline (kept for diagnosis).
   :returns: :class:`RelaxSolution`.
   """
   weights = weights or CATEGORY_WEIGHTS
-  plain_opts = dict(options or {})
-  plain_opts.setdefault('presolve', 'choose')     # warm once a basis exists
-  phase_opts = dict(options or {})
-  if phase_presolve:
-    phase_opts['presolve'] = 'on'                 # re-presolve; drop the bad basis
+  options = dict(options or {})
 
   def _info(msg, *a):
     if log is not None:
@@ -357,7 +354,7 @@ def relax_solve_persistent(m, handle, weights=None, options=None, log=None,
 
   empty = RelaxHandle(floors=[], slack_meta={}, slack_keys=[], weights=weights)
   if not handle.slack_keys:                       # no floors catalogued
-    m.solve(need_duals=True, options=plain_opts, raise_on_infeasible=True)
+    m.solve(need_duals=True, options=options, raise_on_infeasible=True)
     return RelaxSolution(relaxed=False, total_taf=0.0, weighted_relaxation=0.0,
                          objective=m.objective(),
                          report=relaxation_report(m, empty))
@@ -378,7 +375,7 @@ def relax_solve_persistent(m, handle, weights=None, options=None, log=None,
 
   # --- attempt 1: plain economic solve (warm) -----------------------------
   t0 = perf_counter()
-  feas = m.solve(need_duals=True, options=plain_opts, raise_on_infeasible=False,
+  feas = m.solve(need_duals=True, options=options, raise_on_infeasible=False,
                  log_iis=False)
   _info('relax: plain attempt %.0fs (%s)', perf_counter() - t0,
         'feasible' if feas else 'infeasible')
@@ -391,12 +388,19 @@ def relax_solve_persistent(m, handle, weights=None, options=None, log=None,
   _info('relax: infeasible under real costs; targeted relaxation over %d '
         'catalogued floors', len(handle.slack_keys))
 
+  # --- drop the poison basis the infeasible simplex left behind -----------
+  # Clearing the retained basis makes phase 1 start cold instead of warm-starting
+  # off the infeasible vertex the plain attempt parked at.
+  if reset_on_infeasible:
+    m.clear_basis()
+    _info('relax: cleared the infeasible-plain basis before phase 1')
+
   # --- phase 1: minimize weighted shortfall (free slacks, zero arc costs) ---
   m.set_col_bounds(slack_idx, z, floor_l)
   m.set_col_costs(base_idx, np.zeros(n))
   m.set_col_costs(slack_idx, slack_w)
   t0 = perf_counter()
-  if not m.solve(need_duals=True, options=phase_opts, raise_on_infeasible=False,
+  if not m.solve(need_duals=True, options=options, raise_on_infeasible=False,
                  log_iis=False):
     m.set_col_costs(base_idx, m.col_cost)
     m._log_iis()
@@ -417,7 +421,7 @@ def relax_solve_persistent(m, handle, weights=None, options=None, log=None,
   m.set_col_costs(slack_idx, z)
   m.set_col_costs(base_idx, m.col_cost)
   t0 = perf_counter()
-  m.solve(need_duals=True, options=phase_opts, raise_on_infeasible=True,
+  m.solve(need_duals=True, options=options, raise_on_infeasible=True,
           log_iis=True)
   _info('relax: phase-2 %.0fs', perf_counter() - t0)
 
