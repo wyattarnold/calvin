@@ -67,8 +67,13 @@ def _prep_block(links, sample, catalog, enforce_alpha, log):
 
 
 def build_ef(links, samples, T, lam, beta, *, env_flow, catalog,
-             enforce_alpha=True, penalty=None, share_build=True, log=None):
-  """Assemble the S-block extensive-form CVaR model. Returns (m, meta)."""
+             enforce_alpha=True, penalty=None, share_build=True,
+             wtp_tranches=None, wtp_premium=1.0, log=None):
+  """Assemble the S-block extensive-form CVaR model. Returns (m, meta).
+
+  ``wtp_tranches`` (int) prices ag curtailment along the WTP curve instead of the
+  flat big-M, so Q_s carries real ag-WTP-scale costs and the CVaR frontier is not
+  big-M-degenerate."""
   S = len(samples)
   cals = [_prep_block(links, sm, catalog, enforce_alpha, log) for sm in samples]
   cal0 = cals[0]
@@ -156,15 +161,19 @@ def build_ef(links, samples, T, lam, beta, *, env_flow, catalog,
       qcoeffs[skey] = penalty
     m.add_columns(env_cols)
 
-    # trade budget (soft overflow)
-    tcols, trows, ent = trade_budget_rows(df, {'T_tafy': T})
+    # trade budget (soft overflow; WTP-tranched when requested)
+    tcfg = {'T_tafy': T}
+    if wtp_tranches:
+      tcfg['wtp_tranches'] = int(wtp_tranches)
+      tcfg['wtp_premium'] = wtp_premium
+    tcols, trows, ent = trade_budget_rows(df, tcfg)
     ents.append(ent)
     tcol_specs, trow_specs = [], []
     for (key, lo, hi, cost) in tcols:
-      nk = (key[0], s) + key[1:]                   # ('trade_budget'|'overflow', s, wy)
+      nk = (key[0], s) + key[1:]                   # ('trade_budget'|'overflow', s, wy[, t])
       tcol_specs.append((nk, lo, hi, 0.0))
       if key[0] == 'trade_overflow':
-        qcoeffs[nk] = penalty
+        qcoeffs[nk] = cost                          # tranche WTP (or flat big-M)
     m.add_columns(tcol_specs)
     for (coeffs, sense, rhs, label) in trows:
       # ag arcs are (i,j,k) node tuples; budget/overflow are ('trade_*', wy) keys

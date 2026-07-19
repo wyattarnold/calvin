@@ -34,7 +34,52 @@ Design: my-models/two-stage-cap/notes/01-design/cost-of-inaction-study-design.md
 """
 from collections import defaultdict
 
+import numpy as np
+
 from calvin.env_flow import _base, _water_year
+
+
+def ag_overflow_tranches(df, ag_links, n_tranches=8):
+  """Discretize each water year's ag willingness-to-pay curve into equal-volume
+  curtailment tranches, cheapest ag first.
+
+  Curtailing ag beyond the trade limit removes the lowest-value ag first (the
+  market fallows cheap ag). This builds that supply-curve-of-curtailment: sort
+  the ag delivery arcs by WTP (= -cost) ascending, cumulate their volume, and cut
+  it into ``n_tranches`` equal-volume steps. Each tranche's price is the marginal
+  WTP at its volume midpoint, so a priced overflow column per tranche makes the LP
+  fill the cheapest ag first and the marginal curtailment cost climb the curve.
+
+  :returns: ``{wy: [(width_taf, price_$per_af), ...]}`` sorted ascending by price;
+    the widths sum to that year's entitlement.
+  """
+  ag = set(ag_links)
+  bi, bj = df['i'].map(_base), df['j'].map(_base)
+  mask = (bi + '-' + bj).isin(ag)
+  sub = df[mask]
+
+  per_wy = defaultdict(list)
+  for row in sub.itertuples():
+    wy = _water_year(row.i)
+    if wy is not None:
+      per_wy[wy].append((-float(row.cost), float(row.upper_bound)))  # (wtp, vol)
+
+  out = {}
+  for wy, pairs in per_wy.items():
+    pairs.sort()                                   # ascending WTP (cheapest ag)
+    wtp = np.array([p[0] for p in pairs])
+    vol = np.array([p[1] for p in pairs])
+    total = float(vol.sum())
+    if total <= 0:
+      out[wy] = []
+      continue
+    cumvol = np.cumsum(vol)
+    edges = np.linspace(0.0, total, n_tranches + 1)
+    mids = 0.5 * (edges[:-1] + edges[1:])
+    prices = np.interp(mids, cumvol, wtp)          # marginal WTP at each midpoint
+    widths = np.diff(edges)
+    out[wy] = [(float(w), float(p)) for w, p in zip(widths, prices)]
+  return out
 
 
 def ag_entitlement(df, ag_links):
@@ -71,6 +116,12 @@ def trade_budget_rows(df, config, log=None):
     ``T_tafy`` (float, annual trade limit; default 0.0 = rigid rights),
     ``overflow_penalty`` (float, per-TAF cost of curtailment beyond the limit;
     default 10x the max absolute arc cost so it never caps the build),
+    ``wtp_tranches`` (int or None; when set, price curtailment along the ag WTP
+    curve in this many equal-volume tranches, cheapest ag first, instead of the
+    flat ``overflow_penalty`` big-M),
+    ``wtp_premium`` (float, multiplier on the tranche WTP; default 1.0 = charge
+    the ag WTP as the institutional premium on top of the demand-arc foregone
+    benefit, i.e. beyond-T curtailment costs ~2x ag WTP),
     ``ag_links`` (optional iterable of base 'i-j'; default
     ``scenario.demand_links('ag')``).
   :returns: ``(col_specs, row_specs, meta)`` where ``col_specs`` is a list of
@@ -90,6 +141,10 @@ def trade_budget_rows(df, config, log=None):
     penalty = 10.0 * float(df['cost'].abs().max())
   penalty = float(penalty)
 
+  n_tr = config.get('wtp_tranches')
+  premium = float(config.get('wtp_premium', 1.0))
+  tranches = ag_overflow_tranches(df, ag_links, int(n_tr)) if n_tr else None
+
   ent, arcs = ag_entitlement(df, ag_links)
   wys = sorted(ent)
 
@@ -97,19 +152,28 @@ def trade_budget_rows(df, config, log=None):
   row_specs = []
   for wy in wys:
     budget_key = ('trade_budget', wy)
-    overflow_key = ('trade_overflow', wy)
     col_specs.append((budget_key, 0.0, T, 0.0))
-    col_specs.append((overflow_key, 0.0, ent[wy], penalty))
     coeffs = {a: 1.0 for a in arcs[wy]}
     coeffs[budget_key] = 1.0
-    coeffs[overflow_key] = 1.0
+    if tranches is not None:
+      # WTP-tranched overflow: one priced column per tranche, cheapest ag first
+      for t, (width, price) in enumerate(tranches.get(wy, [])):
+        ov_key = ('trade_overflow', wy, t)
+        col_specs.append((ov_key, 0.0, width, price * premium))
+        coeffs[ov_key] = 1.0
+    else:
+      overflow_key = ('trade_overflow', wy)
+      col_specs.append((overflow_key, 0.0, ent[wy], penalty))
+      coeffs[overflow_key] = 1.0
     row_specs.append((coeffs, '>=', ent[wy], ('trade_budget', wy)))
 
   if log:
     total_ent = sum(ent.values())
+    mode = ('WTP-tranched (%d, premium %.2g)' % (int(n_tr), premium) if tranches
+            is not None else 'flat penalty %.3g/TAF' % penalty)
     log.info('trade budget: %d water years, ag entitlement %.0f TAF/yr, '
-             'T=%.0f TAF/yr, overflow penalty %.3g/TAF'
-             % (len(wys), total_ent / max(len(wys), 1), T, penalty))
+             'T=%.0f TAF/yr, overflow = %s'
+             % (len(wys), total_ent / max(len(wys), 1), T, mode))
   return col_specs, row_specs, ent
 
 
