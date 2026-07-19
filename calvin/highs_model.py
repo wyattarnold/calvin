@@ -186,6 +186,85 @@ class HighsNetworkModel:
               % (n, n_rows, len(value)))
     return self
 
+  def add_block(self, df, nodes, debug_mode=False, cosvf_mode=False,
+                debug_cost=2e10):
+    """Append an independent operational block (a full network copy) to a model
+    already built with :meth:`build`. The caller namespaces ``df``/``nodes`` so
+    every arc/node key is unique to this block; the block shares nothing with
+    existing blocks except any extra columns (X_cap/X_exp, CVaR) added on top via
+    :meth:`add_columns`/:meth:`add_rows`. Vectorized like :meth:`build`, offset by
+    the current column/row counts.
+
+    :returns: ``(arc_index_block, node_row_block)`` mapping this block's namespaced
+      arcs -> global column index and nodes -> global row index.
+    """
+    import highspy
+
+    i_arr = df.i.to_numpy(); j_arr = df.j.to_numpy(); k_arr = df.k.to_numpy()
+    cost_arr = df.cost.to_numpy(dtype=float)
+    amp_arr = df.amplitude.to_numpy(dtype=float)
+    lb_arr = df.lower_bound.to_numpy(dtype=float)
+    ub_arr = df.upper_bound.to_numpy(dtype=float)
+    n = len(df)
+    if np.any(amp_arr == 0):
+      raise ValueError('zero amplitude on %d arc(s) in block' %
+                       int(np.sum(amp_arr == 0)))
+    arcs = list(zip(i_arr, j_arr, k_arr))
+
+    is_dbug = np.fromiter(
+        ('DBUG' in (str(a) + '_' + str(b)) for a, b in zip(i_arr, j_arr)),
+        dtype=bool, count=n)
+    if debug_mode:
+      base = cost_arr if cosvf_mode else np.ones(n)
+      col_cost = np.where(is_dbug, debug_cost, base)
+    else:
+      col_cost = cost_arr.copy()
+
+    col0 = self.h.getNumCol()
+    row0 = self.h.getNumRow()
+
+    # block balance rows (one per node except SOURCE/SINK)
+    local_row, r = {}, 0
+    for node in nodes:
+      if node in NO_BALANCE:
+        continue
+      local_row[node] = r
+      r += 1
+    n_block_rows = r
+    # add the empty (== 0) balance rows first so the column matrix can reference
+    self.h.addRows(n_block_rows, np.zeros(n_block_rows), np.zeros(n_block_rows),
+                   0, np.zeros(n_block_rows, dtype=np.int32),
+                   np.empty(0, dtype=np.int32), np.empty(0, dtype=float))
+
+    # CSC column matrix (mirror build), row indices offset to the global rows
+    i_row = np.fromiter((local_row.get(x, -1) for x in i_arr),
+                        dtype=np.int64, count=n)
+    j_row = np.fromiter((local_row.get(x, -1) for x in j_arr),
+                        dtype=np.int64, count=n)
+    has_i = i_row >= 0
+    has_j = j_row >= 0
+    rows2 = np.empty(2 * n, dtype=np.int64)
+    vals2 = np.empty(2 * n, dtype=float)
+    valid2 = np.empty(2 * n, dtype=bool)
+    rows2[0::2] = j_row + row0; vals2[0::2] = 1.0; valid2[0::2] = has_j
+    rows2[1::2] = i_row + row0; vals2[1::2] = -1.0 / amp_arr; valid2[1::2] = has_i
+    index = rows2[valid2].astype(np.int32)
+    value = vals2[valid2]
+    nnz_per_col = has_j.astype(np.int64) + has_i.astype(np.int64)
+    starts = np.zeros(n + 1, dtype=np.int32)
+    np.cumsum(nnz_per_col, out=starts[1:])
+    nnz = int(starts[-1])
+
+    self.h.addCols(n, col_cost, lb_arr.copy(), ub_arr.copy(),
+                   nnz, starts[:-1], index, value)
+
+    arc_index_block = {a: col0 + c for c, a in enumerate(arcs)}
+    node_row_block = {node: row0 + lr for node, lr in local_row.items()}
+    self._built = True
+    self._log('info', 'added block: %d cols, %d rows, %d nonzeros (col0=%d '
+              'row0=%d)' % (n, n_block_rows, nnz, col0, row0))
+    return arc_index_block, node_row_block
+
   # -- side constraints and extra columns -----------------------------------
   def _col(self, key):
     """Resolve an arc tuple or a registered column key to a column index."""
@@ -300,6 +379,18 @@ class HighsNetworkModel:
     if len(idx) == 0:
       return
     self.h.changeColsCost(len(idx), idx, np.asarray(costs, dtype=float))
+
+  def col_cost_of(self, keys):
+    """Current objective coefficients of the given column keys (arc tuples or
+    registered extra-column keys), read from the live HiGHS model. Unlike the
+    ``col_cost`` mirror (base arcs only), this reaches extra/slack/penalty columns
+    — used to snapshot the policy-penalty costs before the two-phase objective
+    swap so phase 2 can restore them."""
+    if not keys:
+      return np.empty(0, dtype=float)
+    idx = np.array([self._col(k) for k in keys], dtype=np.int32)
+    cost = np.asarray(self.h.getLp().col_cost_, dtype=float)
+    return cost[idx]
 
   def set_col_bounds(self, indices, lowers, uppers):
     """Vectorized set of column bounds by raw column index (base arcs or extra

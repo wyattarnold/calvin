@@ -701,8 +701,15 @@ class CALVIN():
       opts.update(solver_options)
     if floors is None:
       floors = relaxable_floors(self.df)
+    # neutralize the soft policy penalties (trade overflow, env-flow slack) during
+    # phase 1 so the minimal hard-floor relaxation is measured cleanly under dry
+    # futures (see solve_two_phase's extra_zero_keys).
+    extra_zero_keys = [k for k in self.hmodel.extra_cols
+                       if isinstance(k, tuple) and k
+                       and k[0] in ('trade_overflow', 'env_slack')]
     sol = solve_two_phase(self.hmodel, floors, weights=weights or CATEGORY_WEIGHTS,
-                          options=opts, log=self.log)
+                          options=opts, log=self.log,
+                          extra_zero_keys=extra_zero_keys)
     self.relaxation = sol
     if sol.relaxed:
       self.log.info('Relaxed %.2f TAF of hard floors across %d node-months to '

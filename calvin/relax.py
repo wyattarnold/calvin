@@ -246,7 +246,8 @@ def relaxation_report(m, handle):
   return out.sort_values('shortfall_taf', ascending=False).reset_index(drop=True)
 
 
-def solve_two_phase(m, floors, weights=None, options=None, log=None):
+def solve_two_phase(m, floors, weights=None, options=None, log=None,
+                    extra_zero_keys=None):
   """Solve ``m``, relaxing catalogued floors only if it is infeasible.
 
   1. Plain solve. If optimal, return with an empty report (zero overhead — the
@@ -259,6 +260,11 @@ def solve_two_phase(m, floors, weights=None, options=None, log=None):
      the native IIS and raise.
 
   :param m: a built, un-solved :class:`~calvin.highs_model.HighsNetworkModel`.
+  :param extra_zero_keys: policy-penalty column keys (e.g. ``('trade_overflow',
+    wy)``, ``('env_slack',)+label``) to also zero in phase 1 and restore in
+    phase 2. Without this, a dry future's phase-1 minimal-floor accounting is
+    contaminated by trading floor relaxation against paying those penalties;
+    zeroing them lets phase 1 measure only the hard-floor shortfall.
   :returns: :class:`RelaxSolution`.
   """
   weights = weights or CATEGORY_WEIGHTS
@@ -287,12 +293,19 @@ def solve_two_phase(m, floors, weights=None, options=None, log=None):
   slack_w = np.array([weights.get(handle.slack_meta[k].category, 1.0)
                       for k in handle.slack_keys], dtype=float)
 
+  # policy-penalty columns to neutralize in phase 1 (restored in phase 2)
+  pen_keys = [k for k in (extra_zero_keys or []) if k in m.extra_cols]
+  pen_idx = np.array([m.extra_cols[k] for k in pen_keys], dtype=np.int32)
+  pen_cost = m.col_cost_of(pen_keys)
+
   # --- phase 1: minimize weighted shortfall (zero the real arc costs) -----
   m.set_col_costs(base_idx, np.zeros(n))
   m.set_col_costs(slack_idx, slack_w)          # (already set at add; explicit)
+  m.set_col_costs(pen_idx, np.zeros(len(pen_idx)))
   if not m.solve(need_duals=True, options=options, raise_on_infeasible=False,
                  log_iis=False):
     m.set_col_costs(base_idx, m.col_cost)      # restore before bailing
+    m.set_col_costs(pen_idx, pen_cost)
     m._log_iis()
     raise RuntimeError('relaxation infeasible: the conflict lies outside the '
                        'catalogued floors (routing capacity or inflow/initial '
@@ -308,6 +321,7 @@ def solve_two_phase(m, floors, weights=None, options=None, log=None):
   m.set_col_bounds(slack_idx, s1, s1)          # freeze the phase-1 allocation
   m.set_col_costs(slack_idx, np.zeros(len(slack_idx)))
   m.set_col_costs(base_idx, m.col_cost)        # restore real economic costs
+  m.set_col_costs(pen_idx, pen_cost)           # restore policy penalties
   m.solve(need_duals=True, options=options, raise_on_infeasible=True,
           log_iis=True)
 
@@ -318,7 +332,7 @@ def solve_two_phase(m, floors, weights=None, options=None, log=None):
 
 
 def relax_solve_persistent(m, handle, weights=None, options=None, log=None,
-                           reset_on_infeasible=True):
+                           reset_on_infeasible=True, extra_zero_keys=None):
   """One cell's two-phase solve on a model that ALREADY carries the elastic
   scaffolding (``add_relaxation`` was called once up front).
 
@@ -369,6 +383,11 @@ def relax_solve_persistent(m, handle, weights=None, options=None, log=None,
   n = m.n_arc_cols
   base_idx = np.arange(n, dtype=np.int32)
 
+  # policy-penalty columns to neutralize in phase 1 (restored in phase 2)
+  pen_keys = [k for k in (extra_zero_keys or []) if k in m.extra_cols]
+  pen_idx = np.array([m.extra_cols[k] for k in pen_keys], dtype=np.int32)
+  pen_cost = m.col_cost_of(pen_keys)
+
   # --- clean start: hard floors (slacks pinned to 0, unpriced) -------------
   m.set_col_bounds(slack_idx, z, z)
   m.set_col_costs(slack_idx, z)
@@ -399,10 +418,12 @@ def relax_solve_persistent(m, handle, weights=None, options=None, log=None,
   m.set_col_bounds(slack_idx, z, floor_l)
   m.set_col_costs(base_idx, np.zeros(n))
   m.set_col_costs(slack_idx, slack_w)
+  m.set_col_costs(pen_idx, np.zeros(len(pen_idx)))
   t0 = perf_counter()
   if not m.solve(need_duals=True, options=options, raise_on_infeasible=False,
                  log_iis=False):
     m.set_col_costs(base_idx, m.col_cost)
+    m.set_col_costs(pen_idx, pen_cost)
     m._log_iis()
     raise RuntimeError('relaxation infeasible: the conflict lies outside the '
                        'catalogued floors (routing capacity or a delivery floor '
@@ -420,6 +441,7 @@ def relax_solve_persistent(m, handle, weights=None, options=None, log=None,
   m.set_col_bounds(slack_idx, s1, s1)
   m.set_col_costs(slack_idx, z)
   m.set_col_costs(base_idx, m.col_cost)
+  m.set_col_costs(pen_idx, pen_cost)
   t0 = perf_counter()
   m.solve(need_duals=True, options=options, raise_on_infeasible=True,
           log_iis=True)
