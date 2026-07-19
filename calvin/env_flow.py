@@ -1,23 +1,29 @@
 """Bay-Delta percent-of-unimpaired environmental-flow constraints.
 
-Adds year-type-dependent minimum instream flows to a CALVIN Pyomo model:
+Adds minimum instream flows to a CALVIN model, per period (water year, or month
+when ``monthly=True``):
 
-  per tributary t, water year wy:
-     Σ_months flow(t reservoir-release reach) ≥ pct(wy) · Σ_months (t unimpaired)
-  aggregate Delta outflow, wy:
-     Σ_months (Req_Delta + Surp_Delta) ≥ max( existing Req_Delta requirement,
-                                              Σ_t pct(wy)·unimpaired_t )
+  per tributary t, period p:
+     Σ flow(t reservoir-release reach) ≥ pct · Σ (t unimpaired)   over p
+  aggregate Delta outflow, period p:
+     Σ (Req_Delta + Surp_Delta) ≥ max( existing Req_Delta requirement,
+                                        Σ_t pct·unimpaired_t )      over p
 
-``pct(wy)`` comes from a system-wide year-type classification of total
-Delta-watershed unimpaired inflow (wet 0.55 / middle 0.40 / dry 0.30), using
-FIXED terciles of the full historical record (``data/delta_unimpaired_wy.csv``)
-so a water year gets the same label in any window or bootstrap sample.
+``pct`` is either a flat float (e.g. 0.40 every period, the two-stage study
+setting) or a year-type ladder ``{'wet':0.55,'middle':0.40,'dry':0.30}`` classed
+by FIXED historical terciles of Delta-watershed unimpaired inflow
+(``data/delta_unimpaired_wy.csv``; annual only). The monthly form scales each
+month's requirement to that month's sampled unimpaired inflow.
 
 Unimpaired inflow is exogenous (fixed ``INFLOW`` arc bounds), so every RHS is a
 constant computed from the links DataFrame; the constraints only sum
 ``model.X`` flow variables. The per-tributary reservoir/reach mapping is curated
 in ``data/delta_tributaries.csv``; each tributary's unimpaired inflow is derived
 by graph reachability (the rim inflows that drain to its terminal reservoir).
+
+On the HiGHS backend, ``relax``/``relax_penalty`` add a penalized slack per row
+so a dry period pays a penalty instead of going infeasible (feasibility backstop
+and Benders feasibility-cut source).
 
 Design: my-models/two-stage-cap/notes/01-design/cost-of-inaction-study-design.md §4.1
 """
@@ -55,6 +61,14 @@ def _water_year(node):
   d = parts[1]
   y, m = int(d[:4]), int(d[5:7])
   return y + 1 if m >= 10 else y
+
+
+def _year_month(node):
+  """'YYYY-MM' of a timestamped node id, else None (monthly period key)."""
+  parts = node.split('.', 1)
+  if len(parts) != 2:
+    return None
+  return parts[1][:7]
 
 
 def load_tributaries(path=None):
@@ -123,20 +137,32 @@ def _ancestors(rev, target):
   return seen
 
 
-def compute_requirements(df, tribs, pct=None, thresholds=None, log=None):
+def compute_requirements(df, tribs, pct=None, thresholds=None, monthly=False,
+                         log=None):
   """Compute all env-flow RHS constants and the arcs each constraint sums.
 
+  :param pct: either a **float** (flat percent-of-unimpaired applied to every
+    period) or a **dict** ``{'wet','middle','dry'}`` (year-type ladder; annual
+    only). Default is the ladder :data:`DEFAULT_PCT`.
+  :param monthly: if True, one constraint per (tributary, ``'YYYY-MM'``) scaled
+    to that month's unimpaired inflow; else per (tributary, water year). Because
+    the sampled climate sets the ``INFLOW`` bounds, ``pct x unimpaired``
+    auto-scales per sample either way.
   :param thresholds: (lo, hi) fixed year-type cut points on total Delta-watershed
-    unimpaired inflow. Defaults to :func:`historical_thresholds` (the full-record
-    terciles), so a water year gets the SAME label in any window or bootstrap
-    sample. Falls back to df-relative terciles only if no historical reference
-    exists.
+    unimpaired inflow (ladder pct only). Defaults to :func:`historical_thresholds`
+    so a water year gets the SAME label in any window/bootstrap sample.
   :returns: dict with keys
-    ``trib`` -> list of (name, wy, rhs, [arc keys]) per (tributary, water year)
-    ``agg``  -> list of (wy, rhs, [arc keys]) per water year
-    ``year_type`` -> {wy: 'wet'|'middle'|'dry'}
+    ``trib`` -> list of (name, key, rhs, [arc keys]) per (tributary, period)
+    ``agg``  -> list of (key, rhs, [arc keys]) per period
+    ``year_type`` -> {wy: 'wet'|'middle'|'dry'} (empty for flat/monthly)
+    where ``key`` is a water year (int) or a ``'YYYY-MM'`` string.
   """
-  pct = pct or DEFAULT_PCT
+  pct = DEFAULT_PCT if pct is None else pct
+  flat = not isinstance(pct, dict)
+  if not flat and monthly:
+    raise ValueError('the year-type pct ladder is annual only; pass a flat '
+                     'float pct for monthly env-flow')
+  keyfn = _year_month if monthly else _water_year
 
   # base directed graph (predecessors) for reachability
   bi = df['i'].map(_base)
@@ -152,47 +178,49 @@ def compute_requirements(df, tribs, pct=None, thresholds=None, log=None):
   rim_delta = rim_nodes & delta_ancestors  # Delta-watershed rim inflows
 
   # INFLOW arc volumes (unimpaired = the natural inflow = fixed upper bound),
-  # indexed by (base target node, water year)
-  inflow_rows = df[is_inflow]
-  inflow_by_node_wy = defaultdict(float)
-  for row in inflow_rows.itertuples():
-    node = _base(row.j)
-    wy = _water_year(row.j)
-    if wy is not None:
-      inflow_by_node_wy[(node, wy)] += row.upper_bound
+  # indexed by (base target node, period key)
+  inflow_by_node = defaultdict(float)
+  for row in df[is_inflow].itertuples():
+    key = keyfn(row.j)
+    if key is not None:
+      inflow_by_node[(_base(row.j), key)] += row.upper_bound
+  all_keys = sorted({k for (_, k) in inflow_by_node})
 
-  all_wys = sorted({wy for (_, wy) in inflow_by_node_wy})
-
-  # total Delta-watershed unimpaired inflow per water year
-  total_unimp = {wy: 0.0 for wy in all_wys}
-  for (node, wy), v in inflow_by_node_wy.items():
-    if node in rim_delta:
-      total_unimp[wy] += v
-
-  # year type by FIXED historical terciles, so a water year gets the same label
-  # in any window / bootstrap sample (not the df's own terciles).
-  if thresholds is None:
-    thresholds = historical_thresholds()
-  if thresholds is not None:
-    lo, hi = thresholds
-    year_type = {wy: ('dry' if total_unimp[wy] < lo else
-                      'wet' if total_unimp[wy] >= hi else 'middle')
-                 for wy in all_wys}
-  else:
-    if log:
-      log.warning('env_flow: no historical unimpaired reference (%s); using '
-                  'df-relative terciles (NOT fixed)' % DEFAULT_UNIMP_CSV)
-    ranked = sorted(all_wys, key=lambda wy: total_unimp[wy])
-    n = len(ranked)
+  # per-period percentage: flat, or the annual year-type ladder
+  if flat:
     year_type = {}
-    for rank, wy in enumerate(ranked):
-      frac = (rank + 0.5) / n
-      year_type[wy] = 'dry' if frac < 1/3 else ('middle' if frac < 2/3 else 'wet')
+    def pct_for(_key):
+      return pct
+  else:
+    total_unimp = defaultdict(float)
+    for (node, key), v in inflow_by_node.items():
+      if node in rim_delta:
+        total_unimp[key] += v
+    if thresholds is None:
+      thresholds = historical_thresholds()
+    if thresholds is not None:
+      lo, hi = thresholds
+      year_type = {k: ('dry' if total_unimp[k] < lo else
+                       'wet' if total_unimp[k] >= hi else 'middle')
+                   for k in all_keys}
+    else:
+      if log:
+        log.warning('env_flow: no historical unimpaired reference (%s); using '
+                    'df-relative terciles (NOT fixed)' % DEFAULT_UNIMP_CSV)
+      ranked = sorted(all_keys, key=lambda k: total_unimp[k])
+      n = len(ranked)
+      year_type = {}
+      for rank, k in enumerate(ranked):
+        frac = (rank + 0.5) / n
+        year_type[k] = 'dry' if frac < 1/3 else ('middle' if frac < 2/3
+                                                 else 'wet')
+    def pct_for(key):
+      return pct[year_type[key]]
 
   # per-tributary unimpaired inflow (rim inflows draining to the terminal
-  # reservoir) and the reservoir-release reach arcs
-  trib_unimp = defaultdict(float)   # (name, wy) -> volume
-  trib_arcs = defaultdict(list)     # (name, wy) -> [(i,j,k)]
+  # reservoir) and the reservoir-release reach arcs, keyed by period
+  trib_unimp = defaultdict(float)   # (name, key) -> volume
+  trib_arcs = defaultdict(list)     # (name, key) -> [(i,j,k)]
   for t in tribs:
     anc = _ancestors(rev, t['reservoir'])
     group = (rim_nodes & anc)
@@ -200,60 +228,59 @@ def compute_requirements(df, tribs, pct=None, thresholds=None, log=None):
       raise ValueError('Tributary %s: no rim inflows drain to %s'
                        % (t['name'], t['reservoir']))
     for node in group:
-      for wy in all_wys:
-        v = inflow_by_node_wy.get((node, wy), 0.0)
+      for key in all_keys:
+        v = inflow_by_node.get((node, key), 0.0)
         if v:
-          trib_unimp[(t['name'], wy)] += v
+          trib_unimp[(t['name'], key)] += v
     # reach arcs: reservoir -> reach
     reach_rows = df[(bi == t['reservoir']) & (bj == t['reach'])]
     if reach_rows.empty:
       raise ValueError('Tributary %s: no reach arc %s -> %s in network'
                        % (t['name'], t['reservoir'], t['reach']))
     for row in reach_rows.itertuples():
-      wy = _water_year(row.i)
-      if wy is not None:
-        trib_arcs[(t['name'], wy)].append((row.i, row.j, row.k))
+      key = keyfn(row.i)
+      if key is not None:
+        trib_arcs[(t['name'], key)].append((row.i, row.j, row.k))
 
-  # existing (D-1641) required outflow per water year, and aggregate outflow arcs
+  # existing (D-1641) required outflow per period, and aggregate outflow arcs
   is_req = (bi == DELTA_NODE) & (bj == REQ_TARGET)
   existing_req = defaultdict(float)
   for row in df[is_req].itertuples():
-    wy = _water_year(row.i)
-    if wy is not None:
-      existing_req[wy] += row.lower_bound
+    key = keyfn(row.i)
+    if key is not None:
+      existing_req[key] += row.lower_bound
   is_out = (bi == DELTA_NODE) & bj.isin(OUTFLOW_TARGETS)
   agg_arcs = defaultdict(list)
   for row in df[is_out].itertuples():
-    wy = _water_year(row.i)
-    if wy is not None:
-      agg_arcs[wy].append((row.i, row.j, row.k))
+    key = keyfn(row.i)
+    if key is not None:
+      agg_arcs[key].append((row.i, row.j, row.k))
 
   # assemble
   trib_out = []
   for t in tribs:
-    for wy in all_wys:
-      arcs = trib_arcs.get((t['name'], wy))
+    for key in all_keys:
+      arcs = trib_arcs.get((t['name'], key))
       if not arcs:
         continue
-      rhs = pct[year_type[wy]] * trib_unimp.get((t['name'], wy), 0.0)
-      trib_out.append((t['name'], wy, rhs, arcs))
+      rhs = pct_for(key) * trib_unimp.get((t['name'], key), 0.0)
+      trib_out.append((t['name'], key, rhs, arcs))
 
   agg_out = []
-  for wy in all_wys:
-    arcs = agg_arcs.get(wy)
+  for key in all_keys:
+    arcs = agg_arcs.get(key)
     if not arcs:
       continue
-    trib_sum = sum(pct[year_type[wy]] * trib_unimp.get((t['name'], wy), 0.0)
+    trib_sum = sum(pct_for(key) * trib_unimp.get((t['name'], key), 0.0)
                    for t in tribs)
-    rhs = max(existing_req.get(wy, 0.0), trib_sum)
-    agg_out.append((wy, rhs, arcs))
+    rhs = max(existing_req.get(key, 0.0), trib_sum)
+    agg_out.append((key, rhs, arcs))
 
   if log:
-    log.info('env_flow: %d tributaries, %d water years (%s wet / %s mid / %s dry)'
-             % (len(tribs), len(all_wys),
-                sum(1 for v in year_type.values() if v == 'wet'),
-                sum(1 for v in year_type.values() if v == 'middle'),
-                sum(1 for v in year_type.values() if v == 'dry')))
+    log.info('env_flow: %d tributaries, %d %s (pct=%s)'
+             % (len(tribs), len(all_keys),
+                'months' if monthly else 'water years',
+                pct if flat else 'year-type ladder'))
   return {'trib': trib_out, 'agg': agg_out, 'year_type': year_type}
 
 
@@ -268,13 +295,16 @@ def env_flow_rows(df, config, log=None, tribs=None):
     when ``config['aggregate']`` (default True).
   """
   tribs = tribs or load_tributaries(config.get('tributaries_csv'))
-  pct = {'wet': config.get('pct_wet', DEFAULT_PCT['wet']),
-         'middle': config.get('pct_middle', DEFAULT_PCT['middle']),
-         'dry': config.get('pct_dry', DEFAULT_PCT['dry'])}
+  if 'pct' in config:
+    pct = config['pct']                    # flat float (drops the year-type ladder)
+  else:
+    pct = {'wet': config.get('pct_wet', DEFAULT_PCT['wet']),
+           'middle': config.get('pct_middle', DEFAULT_PCT['middle']),
+           'dry': config.get('pct_dry', DEFAULT_PCT['dry'])}
 
   req = compute_requirements(df, tribs, pct=pct,
                              thresholds=config.get('year_type_thresholds'),
-                             log=log)
+                             monthly=config.get('monthly', False), log=log)
 
   def _coeffs(arcs):
     c = {}
@@ -282,11 +312,11 @@ def env_flow_rows(df, config, log=None, tribs=None):
       c[a] = c.get(a, 0.0) + 1.0
     return c
 
-  specs = [(_coeffs(arcs), '>=', rhs, ('trib', name, wy))
-           for (name, wy, rhs, arcs) in req['trib']]
+  specs = [(_coeffs(arcs), '>=', rhs, ('trib', name, key))
+           for (name, key, rhs, arcs) in req['trib']]
   if config.get('aggregate', True):
-    specs += [(_coeffs(arcs), '>=', rhs, ('agg', wy))
-              for (wy, rhs, arcs) in req['agg']]
+    specs += [(_coeffs(arcs), '>=', rhs, ('agg', key))
+              for (key, rhs, arcs) in req['agg']]
   return req, specs
 
 
@@ -310,7 +340,25 @@ def add_env_flow_constraints(model, df, config, log=None, tribs=None):
   agg_specs = [s for s in specs if s[3][0] == 'agg']
 
   if hasattr(model, 'add_rows'):        # HighsNetworkModel
-    model.add_rows(specs)
+    # optional penalized slack per row: a dry month pays a penalty instead of
+    # going infeasible (feasibility backstop + Benders feasibility-cut source).
+    penalty = config.get('relax_penalty')
+    if penalty is None and config.get('relax'):
+      penalty = 10.0 * float(df['cost'].abs().max())
+    if penalty:
+      col_specs, soft = [], []
+      for (coeffs, sense, rhs, label) in specs:
+        skey = ('env_slack',) + label
+        col_specs.append((skey, 0.0, rhs, float(penalty)))   # slack in [0, rhs]
+        c = dict(coeffs); c[skey] = 1.0
+        soft.append((c, sense, rhs, label))
+      model.add_columns(col_specs)       # slack columns first
+      model.add_rows(soft)
+      if log:
+        log.info('env_flow: %d rows made soft (penalty %.3g/TAF)'
+                 % (len(specs), float(penalty)))
+    else:
+      model.add_rows(specs)
   else:                                  # Pyomo model
     from pyomo.environ import ConstraintList
     # ConstraintList indices are 1-based in add order; keep parallel label maps

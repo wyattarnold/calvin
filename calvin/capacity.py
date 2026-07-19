@@ -134,6 +134,15 @@ def load_expansions(expansions_csv=None, arcs_csv=None):
   arcs['om_var_per_af'] = arcs['om_var_per_af'].fillna(0.0)
   arcs['coeff'] = arcs['coeff'].fillna(1.0)
 
+  # optional 'enabled' column: enabled=0 parks an expansion (and its coupled
+  # arcs) out of the model without deleting the row, so it can be switched back
+  # on by editing one cell. Missing column means every expansion is enabled.
+  if 'enabled' in exp.columns:
+    disabled = set(exp.index[exp.enabled.fillna(1).astype(int) == 0])
+    if disabled:
+      exp = exp[~exp.index.isin(disabled)]
+      arcs = arcs[~arcs.expansion.isin(disabled)]
+
   orphans = set(arcs.expansion) - set(exp.index)
   if orphans:
     raise ValueError('expansion_arcs rows for unknown expansions: %s'
@@ -157,7 +166,8 @@ class CALVINCap(CALVIN):
                legacy_desal='existing', discount_rate=0.04, facility_life=30,
                cap_groups=None, scenario=None, enforce_alpha=True,
                expansions_csv=None, expansion_arcs_csv=None, exp_groups=None,
-               env_flow=None, **kwargs):
+               env_flow=None, disable_facilities=None, trade_budget=None,
+               **kwargs):
     """
     :param linksfile: (string) CSV of the time-expanded monthly network
     :param facilities_csv: (string) facility table (default calvin/data/facilities.csv)
@@ -186,10 +196,23 @@ class CALVINCap(CALVIN):
     :param env_flow: (dict) Bay-Delta percent-of-unimpaired env-flow config
       (see calvin.env_flow.add_env_flow_constraints); None or enabled=False
       adds no environmental-flow side constraints
+    :param disable_facilities: (iterable of str) facility names to drop from
+      the option set at load time, for counterfactual runs (e.g. "no
+      conservation available"). Unknown names raise; the loaded CSV is left
+      untouched so one catalog serves every variant.
     """
     super().__init__(linksfile, **kwargs)
 
     self.facilities, self.profiles = load_facilities(facilities_csv, profiles_csv)
+    if disable_facilities:
+      drop = set(disable_facilities)
+      unknown = drop - set(self.facilities.index)
+      if unknown:
+        raise ValueError('disable_facilities names not in catalog: %s'
+                         % sorted(unknown))
+      self.facilities = self.facilities[~self.facilities.index.isin(drop)]
+      self.log.info('disable_facilities: dropped %d facilities (%s)',
+                    len(drop), ', '.join(sorted(drop)))
     if not enforce_alpha:
       self.facilities['alpha'] = 0.0
       self.log.info('enforce_alpha=False: alpha zeroed, capacity may idle')
@@ -274,6 +297,8 @@ class CALVINCap(CALVIN):
 
     self.env_flow = env_flow
     self.env_flow_req = None
+    self.trade_budget = trade_budget
+    self.trade_ent = None
 
     self.nodes = pd.unique(self.df[['i', 'j']].values.ravel()).tolist()
     self.links = list(zip(self.df.i, self.df.j, self.df.k))
@@ -515,6 +540,10 @@ class CALVINCap(CALVIN):
       from calvin.env_flow import add_env_flow_constraints
       self.env_flow_req = add_env_flow_constraints(
           self.hmodel, self.df, self.env_flow, log=self.log)
+    if self.trade_budget and self.trade_budget.get('enabled', True):
+      from calvin.trade import add_trade_budget
+      self.trade_ent = add_trade_budget(
+          self.hmodel, self.df, self.trade_budget, log=self.log)
     return self.hmodel
 
   def _extend_highs_capacity(self):
