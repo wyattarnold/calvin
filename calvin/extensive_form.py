@@ -68,7 +68,8 @@ def _prep_block(links, sample, catalog, enforce_alpha, log):
 
 def build_ef(links, samples, T, lam, beta, *, env_flow, catalog,
              enforce_alpha=True, penalty=None, share_build=True,
-             wtp_tranches=None, wtp_premium=1.0, log=None):
+             wtp_tranches=None, wtp_premium=1.0, soft_alpha=False,
+             soft_floor_arcs=None, log=None):
   """Assemble the S-block extensive-form CVaR model. Returns (m, meta).
 
   ``wtp_tranches`` (int) prices ag curtailment along the WTP curve instead of the
@@ -99,6 +100,12 @@ def build_ef(links, samples, T, lam, beta, *, env_flow, catalog,
   for s, cal in enumerate(cals):
     df = cal.df
     floors = relaxable_floors(df)
+    if soft_floor_arcs is not None:
+      # only soften the floors that actually bind (precomputed); the rest stay
+      # hard. Shrinks the priced-soft set from ~147k to ~2k -> far smaller, less
+      # degenerate LP. Safe because the binding set is computed at zero build (the
+      # maximal-shortage case); positive builds only relieve floors.
+      floors = [f for f in floors if f.arc in soft_floor_arcs]
     # free the floor lower bounds in the df copy; re-imposed as priced-soft rows
     frecs = []
     if floors:
@@ -201,6 +208,7 @@ def build_ef(links, samples, T, lam, beta, *, env_flow, catalog,
 
     # facility capacity coupling to the shared X_cap
     cap_rows = []
+    alpha_cols = []       # soft take-or-pay slacks (Benders only, see soft_alpha)
     for f in fac_names:
       a_f = float(alpha[f]) if f in alpha.index else 0.0
       for (fac, i, j, k) in [(f,) + a for a in fac_arcs[f]]:
@@ -209,8 +217,19 @@ def build_ef(links, samples, T, lam, beta, *, env_flow, catalog,
         cap_rows.append(({ns_a: 1.0, capkey(s, f): -co}, '<=', 0.0,
                          ('cap_upper', s, fac, i, j, k)))
         if a_f > 0:
-          cap_rows.append(({ns_a: 1.0, capkey(s, f): -co * a_f}, '>=', 0.0,
-                           ('cap_lower', s, fac, i, j, k)))
+          row = {ns_a: 1.0, capkey(s, f): -co * a_f}
+          if soft_alpha:
+            # arc + slack >= X_cap*co*alpha: lets a *fixed* build fall short of its
+            # take-or-pay at a penalty (a hard row would make the Benders
+            # subproblem infeasible when the forced flow can't be routed). The
+            # optimum respects take-or-pay, so the slack is 0 there.
+            sk = ('alpha_slack', s, fac, i, j, k)
+            alpha_cols.append((sk, 0.0, np.inf, 0.0))
+            row[sk] = 1.0
+            qcoeffs[sk] = penalty
+          cap_rows.append((row, '>=', 0.0, ('cap_lower', s, fac, i, j, k)))
+    if alpha_cols:
+      m.add_columns(alpha_cols)
     m.add_rows(cap_rows)
 
     # shared group ceilings (per block, on the shared cap columns)

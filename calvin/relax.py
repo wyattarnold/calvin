@@ -246,6 +246,48 @@ def relaxation_report(m, handle):
   return out.sort_values('shortfall_taf', ascending=False).reset_index(drop=True)
 
 
+def binding_floors(m, floors, weights=None, options=None, extra_zero_keys=None):
+  """Which catalogued floors must be relaxed for feasibility — phase-1 only.
+
+  Runs solve_two_phase's phase-1 (minimize weighted shortfall) and returns the set
+  of ``(i, j, k)`` arcs whose shortfall slack is nonzero, skipping the economic
+  phase-2. Used to pre-identify the small set of floors that actually bind so the
+  extensive-form / Benders blocks can price only those as soft (keeping the other
+  ~145k catalogued floors hard), which shrinks the LP and its degeneracy. Call on a
+  freshly built model at the *minimal* build (zero capacity) so the binding set is
+  the maximal-shortage superset; positive builds only relieve floors.
+
+  :param m: a built, un-solved ``HighsNetworkModel`` (throwaway — its bounds/costs
+    are mutated). :returns: ``set`` of binding floor arcs (empty if already
+    feasible).
+  """
+  weights = weights or CATEGORY_WEIGHTS
+  if m.solve(need_duals=False, options=options, raise_on_infeasible=False,
+             log_iis=False):
+    return set()                                   # feasible: nothing binds
+  handle = add_relaxation(m, floors, weights)
+  slack_idx = np.array([m.extra_cols[k] for k in handle.slack_keys],
+                       dtype=np.int32)
+  slack_w = np.array([weights.get(handle.slack_meta[k].category, 1.0)
+                      for k in handle.slack_keys], dtype=float)
+  n = m.n_arc_cols
+  base_idx = np.arange(n, dtype=np.int32)
+  pen_keys = [k for k in (extra_zero_keys or []) if k in m.extra_cols]
+  pen_idx = np.array([m.extra_cols[k] for k in pen_keys], dtype=np.int32)
+  # cold phase-1 (clear the infeasible plain-attempt basis, else phase-1 grinds
+  # through degenerate pivots; see relax_solve_persistent).
+  m.clear_basis()
+  m.set_col_costs(base_idx, np.zeros(n))
+  m.set_col_costs(slack_idx, slack_w)
+  if len(pen_idx):
+    m.set_col_costs(pen_idx, np.zeros(len(pen_idx)))
+  m.solve(need_duals=False, options=options, raise_on_infeasible=True,
+          log_iis=True)
+  caps = m.cap_values()
+  return {handle.slack_meta[k].arc for k in handle.slack_keys
+          if caps.get(k, 0.0) > 1e-6}
+
+
 def solve_two_phase(m, floors, weights=None, options=None, log=None,
                     extra_zero_keys=None):
   """Solve ``m``, relaxing catalogued floors only if it is infeasible.
