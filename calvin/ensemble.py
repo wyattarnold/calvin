@@ -32,6 +32,16 @@ from calvin.futures import (apply_warm_shift, rim_inflow_mask, GCM_DIR,
                             WINTER_MONTHS)
 
 
+# Routable-winter ceiling. The modeled delta/channel conveyance floods (a
+# multi-node export-limit infeasibility, no spill) when the peak winter-inflow
+# multiplier (1 + WA) * WI climbs past ~1.82x historical. The wa x wi feasibility
+# boundary is 2-D but collapses cleanly onto this product (feasible <= 1.82,
+# infeasible >= 1.88 across the full-solve grid). Cap WI so a draw stays just
+# under it: wet futures keep their annual wetness (WA), only the winter
+# concentration is trimmed to what the network can route.
+WINTER_ROUTABLE_MULT = 1.80
+
+
 # ---------------------------------------------------------------------------
 # The GCM (WA, WI) cloud
 # ---------------------------------------------------------------------------
@@ -142,7 +152,8 @@ def _hist_winter_fraction(base_links_df):
 
 
 def draw_samples(n, seed, *, base_links_df, cloud=None, cache_path=None,
-                 tail_inflation=1.0, mean_shift=(0.0, 0.0), colorado_kw=None):
+                 tail_inflation=1.0, mean_shift=(0.0, 0.0), colorado_kw=None,
+                 winter_routable=WINTER_ROUTABLE_MULT):
   """
   Draw ``n`` future dicts, each ``{'warm_shift': {'wa_target', 'winter_index'},
   'colorado_cut_taf'}``, ready to pass to ``futures.apply_futures``.
@@ -158,6 +169,9 @@ def draw_samples(n, seed, *, base_links_df, cloud=None, cache_path=None,
   :param tail_inflation/mean_shift: covariance scaling / recentring knobs.
   :param colorado_kw: overrides for :func:`colorado_cut_from_wa` (e.g.
     ``noise_sigma``); ``wa_med`` defaults to the cloud median.
+  :param winter_routable: cap on the peak winter-inflow multiplier ``(1+WA)*WI``
+    so a draw stays inside the network's routable-winter envelope (see
+    :data:`WINTER_ROUTABLE_MULT`); set to ``0``/``None`` to disable.
   """
   rng = np.random.default_rng(seed)
   if cloud is None:
@@ -172,7 +186,9 @@ def draw_samples(n, seed, *, base_links_df, cloud=None, cache_path=None,
   samples = []
   for wa, wi in wawi:
     wa, wi = float(wa), float(wi)
-    wi = min(wi, (1.0 + wa) / winter_frac * 0.999)   # feasibility ceiling
+    wi = min(wi, (1.0 + wa) / winter_frac * 0.999)   # winter <= total inflow
+    if winter_routable:                              # winter <= routable capacity
+      wi = min(wi, winter_routable / (1.0 + wa))
     cut = colorado_cut_from_wa(wa, rng=rng, **ckw)
     samples.append({'warm_shift': {'wa_target': wa, 'winter_index': wi},
                     'colorado_cut_taf': cut})

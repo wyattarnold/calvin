@@ -41,11 +41,16 @@ COLORADO_NODE = 'SR_CR3'
 
 # Surface rim inflows excluded from the climate multiplier: groundwater basins
 # (not rim runoff), the artificial Desal/CN2 backstop sources, the Colorado
-# import, and the salt-import placeholders. Everything else fed by an INFLOW
-# arc is a natural surface rim inflow (~37 MAF/yr across 92 nodes, ~ the design's
-# 35.3-MAF anchor).
+# import, the salt-import placeholders, and the SoCal urban local-supply headers
+# (HXCMWD/HXEWMWD/HXSD, feeding Central MWD / Eastern MWD / San Diego). The HX
+# headers are urban supply, not Sierra rim runoff, and their delivery arcs are
+# hard-capped with no spill, so applying the winter-concentration signal to them
+# floods a handful of Jan/Feb node-months into infeasibility. Everything else fed
+# by an INFLOW arc is a natural surface rim inflow (~37 MAF/yr across 92 nodes,
+# ~ the design's 35.3-MAF anchor).
 RIM_EXCLUDE_PREFIXES = ('GW_', 'SR_CR')
-RIM_EXCLUDE_NODES = frozenset({'Desal', 'CN2', 'C146', 'C148'})
+RIM_EXCLUDE_NODES = frozenset({'Desal', 'CN2', 'C146', 'C148',
+                               'HXCMWD', 'HXEWMWD', 'HXSD'})
 
 
 # ---------------------------------------------------------------------------
